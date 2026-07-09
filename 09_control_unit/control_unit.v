@@ -1,6 +1,7 @@
 module control_unit(
     input wire[3:0] opcode,
     output reg reg_write_enable,
+    output reg mem_write_enable,
     output reg[1:0] alu_ctrl
 );
 always @(*)begin
@@ -27,8 +28,24 @@ always @(*)begin
             reg_write_enable = 1'b1;
             alu_ctrl = 2'b11;
         end
+        4'b0101:begin
+            reg_write_enable = 1'b1;
+            mem_write_enable = 1'b0;
+            alu_ctrl = 2'b00;
+        end
+        4'b0110:begin
+            reg_write_enable = 1'b1;
+            mem_write_enable = 1'b0;
+            alu_ctrl = 2'b00;
+        end
+        4'b0111:begin
+            reg_write_enable = 1'b0;
+            mem_write_enable = 1'b1;
+            alu_ctrl = 2'b00;
+        end
         default: begin
                 reg_write_enable = 1'b0;
+                mem_write_enable = 1'b0;
                 alu_ctrl = 2'b00;
             end
     endcase
