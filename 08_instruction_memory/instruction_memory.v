@@ -1,28 +1,34 @@
 module instruction_memory(
-    input wire[3:0] addr,
-    output wire[7:0] instruction
+    input wire [3:0] addr,
+    output wire [7:0] instruction
 );
-reg[7:0] mem[0:15];
+
+    reg [7:0] mem [0:15];
+
     initial begin
+        // Addr 0: LI R0, 3      -> R0 = 3
+        mem[0] = 8'b0101_00_11; 
         
+        // Addr 1: LI R1, 1      -> R1 = 1
+        mem[1] = 8'b0101_01_01; 
         
+        // Addr 2: SUB R0, R1    -> R0 = R0 - 1 (Loop body starts here)
+        mem[2] = 8'b0010_00_01; 
         
-        mem[0] = 8'b0101_00_01; 
-        mem[1] = 8'b0101_01_10; 
+        // Addr 3: JZ to Addr 5  -> If R0==0, jump to 5 to halt. (dest=01, src=01 -> 0101)
+        mem[3] = 8'b1001_01_01; 
         
-        // 2. Store R1 into RAM at the address held in R0
-        mem[2] = 8'b0111_01_00; // STORE R1, R0 -> RAM[1] = 2
+        // Addr 4: JMP to Addr 2 -> Unconditionally jump back to the SUB instruction! (dest=00, src=10 -> 0010)
+        mem[4] = 8'b1000_00_10; 
         
-        // 3. Change R1 to something else
-        mem[3] = 8'b0101_01_11; // LI R1, 3   -> R1 = 3
+        // Addr 5: NOP           -> Halt loop (Program ends)
+        mem[5] = 8'b0000_00_00; 
         
-        // 4. Load the value back from RAM into R2
-        mem[4] = 8'b0110_10_00; // LOAD R2, R0  -> R2 = RAM[1] (Should be 2!)
-        
-        // 5. Add them up to prove it worked
-        mem[5] = 8'b0001_10_01; // ADD R2, R1   -> R2 = R2 + R1 (2 + 3 = 5)
-        
-        mem[6] = 8'b0000_00_00; 
+        // Clear the rest
+        mem[6] = 8'b0000_00_00;
+        mem[7] = 8'b0000_00_00;
     end
-assign instruction = mem[addr];
+
+    assign instruction = mem[addr];
+
 endmodule

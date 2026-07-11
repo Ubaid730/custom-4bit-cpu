@@ -16,17 +16,17 @@ module tb_cpu_top();
 
     initial begin
         // Setup GTKWave dumping
-        $dumpfile("cpu_top_dump.vcd");
+        $dumpfile("cpu_loop_dump.vcd");
         $dumpvars(0, tb_cpu_top);
 
-        // Initialize
+        // Initialize signals
         clk = 0;
         rst = 1; // Hold in reset
         
-        #15;     // Wait a little bit
+        #20;     // Wait a little bit for stability
         rst = 0; // Release reset, CPU starts running!
         
-        #200;    // Let it run for 20 clock cycles
+        #400;    // Let it run for 40 clock cycles to see the full loop
         $finish;
     end
 

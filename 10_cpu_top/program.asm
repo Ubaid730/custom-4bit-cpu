@@ -1,0 +1,4 @@
+LI R0,5
+LI R1,3
+SUB R0,R1
+NOP
