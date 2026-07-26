@@ -8,8 +8,8 @@ module data_memory(
 );
     reg[3:0] ram[0:15];
     initial begin
-        ram[0] = 4'b1010;
-        ram[1] = 4'b1100;
+        ram[0] = 4'b1111;
+        ram[1] = 4'b1010;
         ram[2] = 4'b0101;
     end
     always @(posedge clk) begin
