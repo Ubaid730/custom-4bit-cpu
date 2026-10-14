@@ -1,8 +1,4 @@
-# Simulation build artifacts
+build/
 *.vcd
-cpu_sim
-cpu_test
-new_cpu
-10_cpu_top/cpu
+*.dot
 __pycache__/
-*.pyc

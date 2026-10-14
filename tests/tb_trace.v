@@ -10,7 +10,7 @@ module tb_trace();
             uut.reg_file_inst.reg_out_0, uut.reg_file_inst.reg_out_3, uut.reg_file_inst.reg_out_5,
             uut.flags_inst.zero_out, uut.sp, uut.gpio_leds,
             uut.ram_addr, uut.ram_inst.write_enable, uut.ram_data_out,
-            uut.data_memory.ram[uut.ram_addr]);
+            );
         #600; $finish;
     end
 endmodule

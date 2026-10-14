@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 // tb_full_cpu.v - regression testbench for the 16-bit CPU.
-// Runs two programs out of test_program.v:
+// Runs two programs out of roms/test_program.v:
 //   PASS A (addr 0..6):  countdown 3->2->1->0 with SUB/JZ/JMP (flag timing!)
 //   PASS B (addr 16..):  CALL/RET, STORE/LOAD round-trip, GPIO MMIO, PUSH/POP
 module tb_full_cpu();
