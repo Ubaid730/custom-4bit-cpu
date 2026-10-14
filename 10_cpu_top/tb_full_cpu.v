@@ -1,0 +1,63 @@
+`timescale 1ns/1ps
+// tb_full_cpu.v - regression testbench for the 16-bit CPU.
+// Runs two programs out of test_program.v:
+//   PASS A (addr 0..6):  countdown 3->2->1->0 with SUB/JZ/JMP (flag timing!)
+//   PASS B (addr 16..):  CALL/RET, STORE/LOAD round-trip, GPIO MMIO, PUSH/POP
+module tb_full_cpu();
+
+    reg clk;
+    reg rst;
+
+    integer errors = 0;
+
+    cpu_top uut (
+        .clk(clk),
+        .rst(rst)
+    );
+
+    always #5 clk = ~clk;
+
+    task expect16(input [15:0] got, input [15:0] want, input [8*40:1] name);
+        begin
+            if (got !== want) begin
+                $display("FAIL: %s = %h, expected %h", name, got, want);
+                errors = errors + 1;
+            end else begin
+                $display("PASS: %s = %h", name, got);
+            end
+        end
+    endtask
+
+    initial begin
+        $dumpfile("full_cpu.vcd");
+        $dumpvars(0, tb_full_cpu);
+
+        clk = 0;
+        rst = 1;
+        #25;
+        rst = 0;
+
+        // ---------- PASS A: countdown ----------
+        // cycle budget: LI,LI,SUB,JZ,JMP,SUB,JZ(jmp),JMP,SUB,JZ(taken),DONE...
+        #130;
+        expect16(uut.reg_file_inst.reg_out_0, 16'h0000, "countdown R0 final");
+        expect16(uut.pc_out,                  16'h0010, "PC jumped to DEMO2");
+
+        // ---------- PASS B: CALL/RET + memory + GPIO + stack ----------
+        // remaining instructions each burn one 10ns cycle; park loop reached ~#120 later
+        #200;
+        expect16(uut.reg_file_inst.reg_out_3, 16'h0035, "R3 after STORE/LOAD roundtrip");
+        expect16(uut.gpio_leds,               16'h000A, "GPIO LEDs from MMIO STORE");
+        expect16(uut.reg_file_inst.reg_out_5, 16'h0000, "R5 restored by POP");
+        expect16(uut.sp,                      16'hFFFE, "SP back to reset value");
+        expect16(uut.pc_out,                  16'h001C, "PC parked in halt loop");
+
+        if (errors == 0)
+            $display("\n*** ALL TESTS PASSED ***\n");
+        else
+            $display("\n*** %0d TEST(S) FAILED ***\n", errors);
+
+        $finish;
+    end
+
+endmodule
