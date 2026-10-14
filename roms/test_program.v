@@ -1,6 +1,3 @@
-// test_program.v - hand-assembled ROM image for the regression testbench.
-// Word format (32-bit): opcode[31:24] | dest[19:16] | src[15:12] | src2[11:8] | imm[7:0]
-// LI / jumps / CALL take their 16-bit operand from instruction[15:0].
 module instruction_memory(
     input wire [15:0] addr,
     output wire [31:0] instruction
@@ -9,34 +6,41 @@ module instruction_memory(
     reg [31:0] mem [0:65535];
 
     initial begin
-        // ---------- PASS A: countdown loop (LI/SUB/JZ/JMP + flag gating) ----------
-        mem[0]  = 32'h1000_0003; // LI   R0, 3          ; counter
-        mem[1]  = 32'h1011_0001; // LI   R1, 1          ; step
-        mem[2]  = 32'h0200_0110; // SUB  R0, R1         ; LOOP: R0-=1, sets Z flag
-        mem[3]  = 32'h2100_0006; // JZ   DONE           ; branch when R0==0
-        mem[4]  = 32'h2000_0002; // JMP  LOOP           ; keep counting down
-        mem[5]  = 32'h0000_0000; // NOP                 ; filler
-        mem[6]  = 32'h2000_0010; // DONE: JMP DEMO2     ; fall into pass B
-
-        // ---------- PASS B: CALL/RET + STORE/LOAD + GPIO MMIO + PUSH/POP ----------
-        mem[16] = 32'h1000_000A; // DEMO2: LI   R0, 10      ; first number
-        mem[17] = 32'h1011_002B; //        LI   R1, 43      ; second number
-        mem[18] = 32'h3200_0013; //        CALL ADD_ROUTINE  ; -> 0x13(19), pushes PC+1=20
-        mem[19] = 32'h1022_FF00; //        LI   R2, 0xFF00   ; RAM address
-        mem[20] = 32'h1033_0035; //        LI   R3, 0x35     ; value to store
-        mem[21] = 32'h1233_0020; //        STORE R3, R2      ; ram[0xFF00] = R3 (=0x35)
-        mem[22] = 32'h1033_0000; //        LI   R3, 0        ; clear R3
-        mem[23] = 32'h1133_0020; //        LOAD  R3, R2      ; R3 = ram[0xFF00] (expect 0x0035)
-        mem[24] = 32'h1044_FFF0; //        LI   R4, 0xFFF0   ; GPIO address
-        mem[25] = 32'h1200_0040; //        STORE R0, R4      ; leds = R0 (expect 0x000A)
-        mem[26] = 32'h3055_0000; //        PUSH R5           ; stack: push R5 (=0)
-        mem[27] = 32'h1055_00FF; //        LI   R5, 0xFF     ; scribble on R5
-        mem[28] = 32'h3155_0000; //        POP  R5           ; restore R5 (expect 0x0000)
-        mem[29] = 32'h2000_001D; //        JMP PARK          ; self-loop at 29 forever
-
-        // ---------- subroutine ADD_ROUTINE at 33 ----------
-        mem[19] = 32'h0130_0100; // ADD  R3, R0, R1     ; R3 = R0 + R1 = 0x35 (subroutine body)
-        mem[20] = 32'h3300_0000; // RET                 ; pop return address -> PC=20... wait see below
+        mem[0] = 32'h10000003; // Address 0
+        mem[1] = 32'h10010001; // Address 1
+        mem[2] = 32'h02001100; // Address 2
+        mem[3] = 32'h21000006; // Address 3
+        mem[4] = 32'h20000002; // Address 4
+        mem[5] = 32'h00000000; // Address 5
+        mem[6] = 32'h20000010; // Address 6
+        mem[7] = 32'h00000000; // Address 7
+        mem[8] = 32'h00000000; // Address 8
+        mem[9] = 32'h00000000; // Address 9
+        mem[10] = 32'h00000000; // Address 10
+        mem[11] = 32'h00000000; // Address 11
+        mem[12] = 32'h00000000; // Address 12
+        mem[13] = 32'h00000000; // Address 13
+        mem[14] = 32'h00000000; // Address 14
+        mem[15] = 32'h00000000; // Address 15
+        mem[16] = 32'h1000000A; // Address 16
+        mem[17] = 32'h1001002B; // Address 17
+        mem[18] = 32'h32000021; // Address 18
+        mem[19] = 32'h1002FF00; // Address 19
+        mem[20] = 32'h10030035; // Address 20
+        mem[21] = 32'h12003200; // Address 21
+        mem[22] = 32'h10030000; // Address 22
+        mem[23] = 32'h11030200; // Address 23
+        mem[24] = 32'h1004FFF0; // Address 24
+        mem[25] = 32'h12000400; // Address 25
+        mem[26] = 32'h30005000; // Address 26
+        mem[27] = 32'h100500FF; // Address 27
+        mem[28] = 32'h31050000; // Address 28
+        mem[29] = 32'h34000000; // Address 29
+        mem[30] = 32'h00000000; // Address 30
+        mem[31] = 32'h00000000; // Address 31
+        mem[32] = 32'h00000000; // Address 32
+        mem[33] = 32'h01030000; // Address 33
+        mem[34] = 32'h33000000; // Address 34
     end
 
     assign instruction = mem[addr];

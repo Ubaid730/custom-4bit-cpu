@@ -51,7 +51,7 @@ module tb_full_cpu();
         expect16(uut.leds,               16'h000A, "GPIO LEDs from MMIO STORE");
         expect16(uut.reg_file_inst.reg_out_5, 16'h0000, "R5 restored by POP");
         expect16(uut.sp,                      16'hFFFE, "SP back to reset value");
-        expect16(uut.pc_out,                  16'h001C, "PC parked in halt loop");
+        expect16(uut.pc_out,                  16'h001D, "PC parked at HALT (word 29)");
 
         if (errors == 0)
             $display("\n*** ALL TESTS PASSED ***\n");

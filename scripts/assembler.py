@@ -131,8 +131,18 @@ def assemble(input_file, output_file):
                         if len(parts) >= 3:
                             dest = registers[parts[2].upper()]
 
-                word = ((opcode & 0xFF) << 24) | ((dest & 0xF) << 16) | \
-                       ((src & 0xF) << 12) | ((src2 & 0xF) << 8) | (imm & 0xFF)
+                # The hardware takes the operand of LI / jumps / CALL from
+                # instruction[15:0], so for those opcodes the full 16-bit
+                # immediate must be placed there (src/src2 fields overlap
+                # with it and are forced to 0).  SHL/SHR keep their shift
+                # amount in [3:0] only.
+                if mnemonic in ('LI',) or mnemonic in jump_ops:
+                    src = src2 = 0
+                    word = ((opcode & 0xFF) << 24) | ((dest & 0xF) << 16) | \
+                           (imm & 0xFFFF)
+                else:
+                    word = ((opcode & 0xFF) << 24) | ((dest & 0xF) << 16) | \
+                           ((src & 0xF) << 12) | ((src2 & 0xF) << 8) | (imm & 0xFF)
                 instructions.append(word)
 
             except KeyError:
