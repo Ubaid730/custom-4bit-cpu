@@ -1,5 +1,7 @@
-# Simulation and build artifacts
+alu_sim
+reg_sim
+register_file
+inst_mem
+cu
+ram
 *.vcd
-*_tb
-*.o
-*.out

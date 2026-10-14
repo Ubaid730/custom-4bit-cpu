@@ -4,9 +4,9 @@ module tb_data_memory();
 
     reg clk;
     reg write_enable;
-    reg [3:0] addr;
-    reg [3:0] data_in;
-    wire [3:0] data_out;
+    reg [15:0] addr;
+    reg [15:0] data_in;
+    wire [15:0] data_out;
 
     // Instantiate the Data Memory
     data_memory uut (
@@ -27,26 +27,33 @@ module tb_data_memory();
         // Initialize
         clk = 0;
         write_enable = 0;
-        addr = 4'b0000;
-        data_in = 4'b0000;
+        addr = 16'b0000000000000000;
+        data_in = 16'b0000000000000000;
 
         #10; // Wait for initial block in RAM to finish
 
         // --- TEST 1: Read pre-loaded data ---
-        addr = 4'b0000; #10; // Should read 1010 (A)
-        addr = 4'b0001; #10; // Should read 0101 (5)
+        addr = 16'h0000; #10; // Should read FFFF
+        addr = 16'h0001; #10; // Should read AAAA
 
         // --- TEST 2: Write new data ---
-        addr = 4'b0010;          // Point to Address 2
-        data_in = 4'b1111;       // We want to write 15 (F)
-        write_enable = 1;        // Turn on write mode
-        #10;                     // Wait for clock edge to write
-        
-        write_enable = 0;        // Turn off write mode
-        #10;                     // Wait a cycle
+        addr = 16'h0002;          // Point to Address 2
+        data_in = 16'hBEEF;       // We want to write 0xBEEF
+        write_enable = 1;         // Turn on write mode
+        #10;                      // Wait for clock edge to write
+
+        write_enable = 0;         // Turn off write mode
+        #10;                      // Wait a cycle
 
         // --- TEST 3: Read the data we just wrote ---
-        addr = 4'b0010; #10;     // Should now read 1111 (F)
+        addr = 16'h0002; #10;     // Should now read BEEF
+
+        // --- TEST 4: High address write/read ---
+        addr = 16'hFFFE;
+        data_in = 16'h1234;
+        write_enable = 1; #10;
+        write_enable = 0; #10;
+        addr = 16'hFFFE; #10;     // Should read 1234
 
         $finish;
     end

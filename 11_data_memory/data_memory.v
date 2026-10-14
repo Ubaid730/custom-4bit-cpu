@@ -1,16 +1,16 @@
 module data_memory(
     input wire clk,
     input wire write_enable,
-    input wire[3:0] addr,
-    input wire[3:0] data_in,
-    output wire[3:0] data_out
+    input wire[15:0] addr,
+    input wire[15:0] data_in,
+    output wire[15:0] data_out
 
 );
-    reg[3:0] ram[0:15];
+    reg[15:0] ram[0:65535];
     initial begin
-        ram[0] = 4'b1111;
-        ram[1] = 4'b1010;
-        ram[2] = 4'b0101;
+        ram[0] = 16'hFFFF;
+        ram[1] = 16'hAAAA;
+        ram[2] = 16'h0505;
     end
     always @(posedge clk) begin
         if(write_enable) begin
@@ -19,4 +19,5 @@ module data_memory(
     end
     assign data_out = ram[addr];
 endmodule
+
 

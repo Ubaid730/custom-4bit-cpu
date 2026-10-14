@@ -13,3 +13,15 @@ always @(*)begin
     endcase
 end
 endmodule
+
+// Same idea as the 2to4 above, just wider - we have 16 registers now
+module decoder_4to16(
+    input wire[3:0] select,
+    output reg[15:0] out
+);
+
+always @(*)begin
+    out = 16'b0000000000000000;
+    out[select] = 1'b1;
+end
+endmodule
