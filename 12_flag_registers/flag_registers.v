@@ -1,6 +1,7 @@
 module flags_register(
     input wire clk,
     input wire rst,
+    input wire flags_write,   // only latch new flags when an ALU/CMP ran
     input wire zero_in,
     input wire carry_in,
     input wire overflow_in,
@@ -17,7 +18,10 @@ always @(posedge clk or posedge rst) begin
         overflow_out <= 1'b0;
         negative_out <= 1'b0;
     end
-    else begin
+    else if(flags_write) begin
+        // LI/LOAD/STORE/jumps leave these inputs with stale ALU values -
+        // without the write gate they would silently corrupt the flags and
+        // conditional branches would fire at the wrong time.
         zero_out <= zero_in;
         carry_out <= carry_in;
         overflow_out <= overflow_in;

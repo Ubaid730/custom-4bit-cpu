@@ -22,6 +22,10 @@ adder_subtractor_16bit math_unit(
     .cout(math_cout)
 );
 
+// SUB semantics for the carry flag: borrow happens when a < b
+// (the raw adder cout is inverted for subtraction)
+wire sub_borrow = ~math_cout;
+
 always @(*) begin
     case(opcode)
         3'b000:result = math_result;      // ADD
@@ -39,7 +43,8 @@ end
 assign zero_flag = (result == 16'h0000);
 assign negative_flag = result[15];
 // Carry only meaningful for ADD/SUB
-assign carry_flag = math_op ? math_cout : 1'b0;
+assign carry_flag = (opcode == 3'b000) ? math_cout :
+                    (opcode == 3'b001) ? sub_borrow : 1'b0;
 // Signed overflow: pos+pos=neg or neg+neg=pos (ADD/SUB only)
 wire signed_overflow = (~a[15] & ~b[15] & math_result[15]) |
                        ( a[15] &  b[15] & ~math_result[15]);

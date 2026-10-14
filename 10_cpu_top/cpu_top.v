@@ -30,6 +30,7 @@ module cpu_top(
     wire carry_flag_stored;
     wire overflow_flag_stored;
     wire negative_flag_stored;
+    wire flags_write;   // control unit: only ALU/CMP instructions update flags
 
     wire gpio_write_enable;
     wire actual_ram_write_enable;
@@ -47,7 +48,9 @@ module cpu_top(
     assign immediate = instruction[15:0];
     wire ram_re,ram_we,gpio_re,gpio_we,uart_we;
     wire tx_busy;
-    // LOAD and POP read from memory on the same cycle they execute
+    // LOAD/POP read RAM into a register; conditional jumps READ the operand
+    // registers only - but RET must be excluded here or it would wrongly
+    // classify as a "read op" for the MMIO decoder.
     wire is_read_op = (opcode == 8'h11) || (opcode == 8'h31);
     wire [15:0] gpio_leds;
     wire [15:0] next_pc_val;
@@ -71,8 +74,8 @@ module cpu_top(
         .pc_source(pc_source_cu),
         .reg_in_source(reg_in_source),
         .stack_pop(stack_pop),
-        .stack_push(stack_push)
-
+        .stack_push(stack_push),
+        .flags_write(flags_write)
     );
 
     register_file reg_file_inst (
@@ -90,10 +93,12 @@ module cpu_top(
 
 
     // ALU operand B comes from the right place depending on the instruction type:
-    // LI/JMP/jumps -> the 16-bit immediate field
+    // LI / jumps -> the 16-bit immediate field (the jump TARGET lives there,
+    //               and it must never leak into the ALU - that would spray
+    //               garbage flags all over the flag register).
     // STORE/LOAD/PUSH/POP/CALL/RET -> R[src2] (the address lives there)
     // everything else (ADD/SUB/AND...) -> R[src2] as the second operand too
-    wire [15:0] alu_b = (reg_in_source == 2'b01) | (pc_source_cu != 2'b00) ? immediate : reg_data_b;
+    wire [15:0] alu_b = (reg_in_source == 2'b01) ? immediate : reg_data_b;
 
     alu alu_inst (
         .a(reg_data_a),
@@ -108,6 +113,7 @@ module cpu_top(
 
     flags_register flags_inst (
         .clk(clk), .rst(rst),
+        .flags_write(flags_write),
         .zero_in(zero_flag_raw),
         .carry_in(carry_flag_raw),
         .overflow_in(overflow_flag_raw),
@@ -130,16 +136,21 @@ module cpu_top(
     //   POP/RET   -> read at SP+1 (the value pushed last)
     //   STORE     -> R[src2] holds the address, R[src] holds the data
     //   LOAD      -> R[src2] holds the address, result goes to R[dest]
+    // ALU ops and jumps never touch RAM - gate the write enable so a stray
+    // mem_write_enable can't corrupt memory while executing e.g. ADD.
+    wire ram_write_op  = (opcode == 8'h12) || stack_push;  // STORE / PUSH / CALL
+    wire ram_read_op   = (opcode == 8'h11) || stack_pop;   // LOAD  / POP  / RET
     assign ram_addr = stack_push ? sp :
                       stack_pop  ? (sp + 16'b1) :
                       reg_data_b;
+    // STORE writes R[src]; PUSH writes R[src] too (assembler puts the pushed
+    // register in the src field); CALL writes the return address PC+1.
     assign ram_data_in = (opcode == 8'h32) ? (pc_out + 16'b1) :  // CALL pushes return address
-                     stack_push ? reg_data_a :                   // PUSH R[src] onto the stack
-                     reg_data_a;                                 // STORE R[src] -> [R src2]
+                     reg_data_a;                                 // PUSH/STORE: R[src]
 
     data_memory ram_inst (
         .clk(clk),
-        .write_enable(actual_ram_write_enable),
+        .write_enable(actual_ram_write_enable & ram_write_op),
         .addr(ram_addr),
         .data_in(ram_data_in),
         .data_out(ram_data_out)
@@ -172,22 +183,39 @@ module cpu_top(
 
 
     assign reg_file_data_in = (reg_in_source == 2'b01) ? immediate :
-                              (reg_in_source == 2'b10) ?
-                              ((ram_addr >= 16'hFFF0 && ram_addr <= 16'hFFFA) ? gpio_leds : ram_data_out) :
+                              (reg_in_source == 2'b10) ? ram_data_out :
                               alu_result;
 
+    // Which conditional jumps actually take the branch?
+    // They read the STORED flags - the flags latched by the instruction that
+    // ran last cycle (CMP / SUB / ADD / ...). In this single-cycle design a
+    // jump is fetched & executed while the previous instruction's flags have
+    // JUST landed in the flag register, so "CMP Rx, Ry" immediately followed
+    // by "JZ label" behaves exactly like a real processor.
+    //
+    // THE BUG THAT WAS FIXED: previously the flag register latched on EVERY
+    // clock edge, so non-ALU instructions (LI, LOAD, jumps themselves...)
+    // overwrote the flags with garbage from the idle ALU inputs. Now the
+    // control unit raises `flags_write` only for instructions that really
+    // compute flags, and the flag register keeps its old value otherwise.
+    // That also means flags survive NOPs/LIs between a CMP and its jump.
+    wire cond_true = (opcode == 8'h21) ? zero_flag_stored :         // JZ
+                     (opcode == 8'h22) ? ~zero_flag_stored :        // JNZ
+                     (opcode == 8'h23) ? carry_flag_stored :        // JC (borrow)
+                     (opcode == 8'h24) ? ~carry_flag_stored :       // JNC
+                     (opcode == 8'h25) ? negative_flag_stored :     // JN
+                     (opcode == 8'h26) ? ~negative_flag_stored :    // JNN
+                                         1'b1;                      // JMP always jumps
+
+    // CALL target: the label address lives in the 16-bit immediate field;
+    // jump_addr is shared by JMP / conditional jumps / CALL.
     wire [15:0] jump_addr = immediate;
 
-    // Which conditional jumps actually take the branch?
-    wire cond_true = (opcode == 8'h21) ? zero_flag_raw :         // JZ
-                     (opcode == 8'h22) ? ~zero_flag_raw :        // JNZ
-                     (opcode == 8'h23) ? carry_flag_raw :        // JC
-                     (opcode == 8'h24) ? ~carry_flag_raw :       // JNC
-                     (opcode == 8'h25) ? negative_flag_raw :     // JN
-                     (opcode == 8'h26) ? ~negative_flag_raw :    // JNN
-                                         1'b1;                   // JMP always jumps
+    // RET pops the stack: data_memory reads ram[sp+1] combinationally, which
+    // holds the return address CALL pushed last cycle.
+    wire [15:0] ret_addr = ram_data_out;
 
- assign next_pc_val = (pc_source_cu == 2'b10) ? ram_data_out : // If RET, load PC from RAM
+    assign next_pc_val = (pc_source_cu == 2'b10) ? ret_addr :     // RET -> pop PC from stack
                      (pc_source_cu == 2'b01 && cond_true) ? jump_addr :
                      (pc_out + 16'b1);
 
