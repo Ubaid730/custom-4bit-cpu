@@ -24,7 +24,7 @@ module instruction_memory(
         mem[15] = 32'h00000000; // Address 15
         mem[16] = 32'h1000000A; // Address 16
         mem[17] = 32'h1001002B; // Address 17
-        mem[18] = 32'h32000021; // Address 18
+        mem[18] = 32'h32000023; // Address 18
         mem[19] = 32'h1002FF00; // Address 19
         mem[20] = 32'h10030035; // Address 20
         mem[21] = 32'h12003200; // Address 21
@@ -39,8 +39,14 @@ module instruction_memory(
         mem[30] = 32'h00000000; // Address 30
         mem[31] = 32'h00000000; // Address 31
         mem[32] = 32'h00000000; // Address 32
-        mem[33] = 32'h01030100; // Address 33
-        mem[34] = 32'h33000000; // Address 34
+        mem[33] = 32'h00000000; // Address 33
+        mem[34] = 32'h00000000; // Address 34
+        mem[35] = 32'h30000000; // Address 35
+        mem[36] = 32'h30001000; // Address 36
+        mem[37] = 32'h01030100; // Address 37
+        mem[38] = 32'h31010000; // Address 38
+        mem[39] = 32'h31000000; // Address 39
+        mem[40] = 32'h33000000; // Address 40
     end
 
     assign instruction = mem[addr];

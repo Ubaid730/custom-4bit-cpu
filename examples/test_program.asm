@@ -38,6 +38,12 @@ HALT                // 29: parks here forever
 NOP                 // 30
 NOP                 // 31
 NOP                 // 32
+NOP                 // 33
+NOP                 // 34
 ADD_ROUTINE:
-ADD R3, R0, R1      // 33: R3 = R0 + R1 = 10 + 43 = 0x35
-RET                 // 34: pops 19 -> PC
+PUSH R0             // 35: save args (ADD clobbers R[dest]=R[src])
+PUSH R1             // 36
+ADD R3, R0, R1      // 37: R3 = R0 + R1 = 10 + 43 = 0x35
+POP R1              // 38
+POP R0              // 39
+RET                 // 40: pops return addr -> PC

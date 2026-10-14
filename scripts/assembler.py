@@ -85,14 +85,19 @@ def assemble(input_file, output_file):
                     else:
                         dest = registers[parts[1].upper()]
                         src  = registers[parts[2].upper()]
-                        src2 = src
+                        src2 = src               # ALU-B is read from the src2
+                        # field, so the 2-operand form needs BOTH operands
+                        # present there (R[dest] op R[src]).
 
                 elif mnemonic in reg_imm_ops:
-                    # SHL/SHR R[dest], R[src], amount   (amount 0..15)
+                    # SHL/SHR R[dest], R[src], amount   (amount 0..15).
+                    # The hardware barrel shifter takes the amount from the
+                    # FULL 16-bit operand field instruction[15:0], exactly like
+                    # LI/jumps/CALL, so src/src2 are forced to 0 below.
                     if len(parts) < 4: raise ValueError(f"{mnemonic} requires R[dest], R[src], amount")
                     dest = registers[parts[1].upper()]
                     src  = registers[parts[2].upper()]
-                    src2 = 0                     # cpu_top reads port C as the shift value
+                    src2 = 0
                     imm  = parse_num(parts[3]) & 0xF
 
                 elif mnemonic == 'LI':
@@ -142,7 +147,7 @@ def assemble(input_file, output_file):
                 # immediate must be placed there (src/src2 fields overlap
                 # with it and are forced to 0).  SHL/SHR keep their shift
                 # amount in [3:0] only.
-                if mnemonic in ('LI',) or mnemonic in jump_ops:
+                if mnemonic in ('LI', 'SHL', 'SHR') or mnemonic in jump_ops:
                     src = src2 = 0
                     word = ((opcode & 0xFF) << 24) | ((dest & 0xF) << 16) | \
                            (imm & 0xFFFF)

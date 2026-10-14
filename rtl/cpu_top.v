@@ -54,16 +54,44 @@ module cpu_top(
     wire [15:0] reg_file_data_in;
 
     wire [7:0] raw_opcode = instruction[31:24];
+    
+    // =====================================================================
+    // HALT support (two flavours, both freeze every state element):
+    //   1. the HALT instruction (opcode 0x34) parks the core on its own PC;
+    //   2. STORE bit0=1 to 0xFFFF latches `halted_q` permanently (until
+    //      reset) - the MMIO "power switch" for monitors and OS panics.
+    // g_clk_ok is the "clock good" qualifier wired into PC, SP, register
+    // file, flags, RAM writes and all MMIO write strobes below.
+    // =====================================================================
+    reg  halted_q;
+    reg  halt_arm;                             // one-shot so HALT runs exactly once
+    assign halted = halted_q;
+    
+    wire halt_instr = (raw_opcode == 8'h34);   // raw: opcode is NOP'd once halted
+    wire g_clk_ok = ~halted_q & ~halt_instr;
+    
+    // Forward-declare gated signals used throughout this module
+    wire reg_write_g   = reg_write_enable & g_clk_ok;
+    wire gpio_write_g  = gpio_write_enable & ram_write_op & g_clk_ok;
+    wire uart_start_g  = uart_we & ram_write_op & g_clk_ok;
+    wire ram_write_g   = actual_ram_write_enable & ram_write_op
+                         & ~gpio_write_enable & ~uart_we & g_clk_ok;
+    wire stack_push_g  = stack_push & g_clk_ok;
+    wire stack_pop_g   = stack_pop  & g_clk_ok;
+    wire flags_write_g = flags_write_final & g_clk_ok;
+    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
+    
     // HALT (0x34) is a NOP while the machine is already halted, so the PC can
     // never run off the end of the ROM into x-state memory.
-    assign opcode   = halted_q ? 8'h00 : raw_opcode;
-    assign dest_reg = instruction[19:16];
-    assign src_reg  = instruction[15:12];
-    assign src2_reg = instruction[11:8];
+    wire [7:0]  opcode_f   = instruction[31:24];
+    wire [3:0]  dest_f     = instruction[19:16];
+    wire [3:0]  src_f      = instruction[15:12];
+    wire [3:0]  src2_f     = instruction[11:8];
+    wire [15:0] immediate_f = instruction[15:0];
     // LI / jumps / CALL use the FULL 16-bit operand field [15:0]:
     //   dest lives in [19:16] (harmless overlap with the imm's high byte)
     //   src2  must be forced to 0 so it doesn't alias into the immediate
-    assign immediate = instruction[15:0];
+
     wire is_imm_op = (opcode == 8'h10) ||            // LI
                      (opcode >= 8'h20 && opcode <= 8'h26) || // JMP/JZ/JNZ/JC/JNC/JN/JNN
                      (opcode == 8'h32);               // CALL
@@ -95,6 +123,48 @@ module cpu_top(
         .instruction(instruction)
     );
 
+    // =====================================================================
+    // FETCH -> EXECUTE REGISTER
+    // The ROM presents word N while the PC has already moved to N+1, so if
+    // the datapath decoded the LIVE instruction wire every operation would
+    // run one word off (this was the root cause behind SUB computing R1-R1,
+    // POP restoring wrong values and RET jumping to garbage). We therefore
+    // capture each fetched word into ir_* on the same posedge that advances
+    // the PC, and decode/execute ONLY from those latched fields. HALT parks
+    // the machine: when frozen we stop latching and force the executed
+    // opcode to NOP so no write strobe can fire.
+    // =====================================================================
+    reg [7:0]  ir_opcode;
+    reg [3:0]  ir_dest, ir_src, ir_src2;
+    reg [15:0] ir_imm;
+    reg [15:0] ir_pc;             // PC of the latched word (for CALL return addr)
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ir_opcode <= 8'h00;
+            ir_dest   <= 4'b0000;
+            ir_src    <= 4'b0000;
+            ir_src2   <= 4'b0000;
+            ir_imm    <= 16'b0;
+            ir_pc     <= 16'b0;
+        end else begin
+            ir_opcode <= halted_q ? 8'h00 : opcode_f;
+            ir_dest   <= dest_f;
+            ir_src    <= src_f;
+            ir_src2   <= src2_f;
+            ir_imm    <= immediate_f;
+            ir_pc     <= pc_out;   // pc_out IS the address of the word being
+                                   // presented by the ROM this very moment
+        end
+    end
+
+    // Execute-stage names used by everything below:
+    assign opcode    = ir_opcode;
+    assign dest_reg  = ir_dest;
+    assign src_reg   = ir_src;
+    assign src2_reg  = ir_src2;
+    assign immediate = ir_imm;
+
     control_unit cu_inst (
         .opcode(opcode),
         .reg_write_enable(reg_write_enable),
@@ -109,7 +179,7 @@ module cpu_top(
 
     register_file reg_file_inst (
         .clk(clk), .rst(rst),
-        .write_enable_global(reg_write_g),
+        .write_enable_global(reg_write_enable),   // ungated: HALT never sets it
         // On LI / jumps / CALL the full 16-bit operand lives in [15:0];
         // src2[11:8] is part of that number, so it must not address a register.
         .write_addr(dest_reg),
@@ -122,22 +192,34 @@ module cpu_top(
         .data_out_c(reg_data_c)
     );
 
+    // OPERAND FORWARDING: if a read port addresses the register being
+    // written THIS cycle (same-instruction dest==src forms like SUB R0,R1,
+    // or ADD R3,R0,R1 where dest is also an operand), show the write data
+    // combinationally instead of the stale stored value. The qualifier is
+    // the GATED strobe reg_write_g so a HALTing core can never forward.
+    wire [15:0] reg_a = (reg_write_g && (dest_reg == src_reg))
+                        ? reg_file_data_in : reg_data_a;
+    wire [15:0] reg_b_raw = is_addr_imm ? 16'b0 : reg_data_b;
+    wire [15:0] reg_b = (reg_write_g && !is_addr_imm && (dest_reg == src2_reg))
+                        ? reg_file_data_in : reg_b_raw;
 
     // ALU operand selection.
-    // Operand A: SHL/SHR shift their SOURCE register (encoded in the src
-    // field), which is read by port A; every other op uses port A normally.
-    // Operand B: only ADDI-style ops (none today) would use the immediate;
-    // LI / jumps / CALL must NEVER feed their 16-bit operand into the ALU -
-    // that sprayed garbage Z/N flags all over the flag register and made
-    // later conditional jumps mis-branch (e.g. CALL's target 0x21 set N=1,
-    // and the next LOAD inherited those bogus flags).
-
+    // SHL/SHR are barrel shifts by a 4-bit amount taken from imm[3:0]; they
+    // bypass the ALU entirely (see shlshr_result / the writeback mux below),
+    // so we force alu_ctrl to ADD for them - otherwise the idle ALU computed
+    // garbage Z/N/C flags into the flag register and corrupted the countdown
+    // JZ decisions.
+    // LI / jumps / CALL must NEVER feed their 16-bit operand into the ALU
+    // either - same garbage-flag reason (any big target sets N/Z and the
+    // NEXT conditional branch mis-fires). Forcing alu_ctrl=ADD with b=0
+    // keeps the flags honest.
     wire is_shlshr = (opcode == 8'h07) || (opcode == 8'h08);
+    wire [2:0] alu_ctrl_final = (is_shlshr | is_addr_imm) ? 3'b000 : alu_ctrl;
 
     alu alu_inst (
-        .a(reg_data_a),
-        .b(reg_data_b),
-        .opcode(alu_ctrl),
+        .a(reg_a),
+        .b(reg_b),
+        .opcode(alu_ctrl_final),
         .result(alu_result),
         .zero_flag(zero_flag_raw),
         .carry_flag(carry_flag_raw),
@@ -165,17 +247,48 @@ module cpu_top(
     // the raw idle-ALU zero flag, which "takes" every JZ unconditionally.
     // g_clk_ok is declared further down with the other write strobes.
     wire [15:0] next_pc_val;
-    reg prev_flags_write;
+    reg         prev_flags_write;   // did the LAST executed instruction set flags?
+    reg  [15:0] prev_zero, prev_carry, prev_negative;  // ...and what were they?
+
     always @(posedge clk or posedge rst) begin
-        if (rst) prev_flags_write <= 1'b0;
-        else     prev_flags_write <= flags_write & g_clk_ok;   // frozen during HALT
+        if (rst) begin
+            prev_flags_write <= 1'b0;
+            prev_zero        <= 1'b0;
+            prev_carry       <= 1'b0;
+            prev_negative    <= 1'b0;
+        end else begin
+            // Capture the RAW flag values on every cycle so that when the
+            // NEXT instruction (a conditional jump) executes, prev_* already
+            // holds the flags produced by the ALU op we just ran. This is
+            // the forwarding path for branch decisions.
+            prev_flags_write <= flags_write & g_clk_ok;   // frozen during HALT
+            prev_zero        <= zero_flag_raw;
+            prev_carry       <= carry_flag_raw;
+            prev_negative    <= negative_flag_raw;
+        end
     end
 
     wire is_jump_op = (opcode >= 8'h20) && (opcode <= 8'h26);
 
-    wire zero_eff     = prev_flags_write ? zero_flag_raw     : zero_flag_stored;
-    wire carry_eff    = prev_flags_write ? carry_flag_raw    : carry_flag_stored;
-    wire negative_eff = prev_flags_write ? negative_flag_raw : negative_flag_stored;
+    // THE BRANCH-TIMING BUG THAT WAS FIXED: in this single-cycle core the
+    // flags produced by an ALU instruction are only latched into the flag
+    // register at the SAME clock edge that advances the PC past it. So when
+    // a jump sits right behind its CMP/SUB ("SUB R0,R1 / JZ DONE"), the
+    // STORED flags during the jump cycle are still the OLD ones - the JZ
+    // would sample stale state and mis-branch (this is what made the
+    // countdown stall). Real pipelines solve this with forwarding; we do it
+    // here by peeking at the PREV-CYCLE raw flags whenever the PREVIOUS
+    // executed instruction raised flags_write (i.e. it was an ALU/CMP op),
+    // and falling back to the stored flags otherwise (NOPs/LIs between a
+    // CMP and its jump correctly preserve the latched flags).
+    // With the fetch/execute register the stored flags ARE correctly aligned:
+    // SUB commits its flags on the same edge the JZ is latched, so the JZ's
+    // execute cycle sees the SUB's flags via zero_flag_stored etc. No
+    // prev-cycle peeking needed (that was a workaround for the one-word-off
+    // decode this pipeline replaced).
+    wire zero_eff     = zero_flag_stored;
+    wire carry_eff    = carry_flag_stored;
+    wire negative_eff = negative_flag_stored;
 
     wire cond_true = (opcode == 8'h21) ? zero_eff :          // JZ
                      (opcode == 8'h22) ? ~zero_eff :          // JNZ
@@ -223,26 +336,25 @@ module cpu_top(
     wire ram_write_op  = stack_push | mem_write_enable;   // STORE / PUSH / CALL
     wire ram_read_op   = (opcode == 8'h11) || stack_pop;  // LOAD  / POP  / RET
 
-    // THE ADDRESS BUG THAT WAS FIXED: reg_data_b is a REGISTER FILE output,
-    // i.e. it only updates on a clock edge. On the very first STORE after an
-    // LI loaded the address register, reg_data_b during the STORE cycle still
-    // shows the OLD value - so the store landed in the wrong cell (and worse,
-    // CALLs jumped with a stale operand). Fix: bypass the register file with
-    // the freshly-computed ALU result whenever this instruction reads/writes
-    // memory through R[src2]. The ALU computes exactly R[src2] + 0 on these
-    // opcodes (alu_ctrl defaults to ADD), so alu_result == what R[src2] WILL
-    // be next cycle. This makes STORE/PUSH/LOAD see its operands one cycle
-    // earlier - like forwarding in a real pipelined CPU.
-    wire [15:0] src2_bypassed = (ram_write_op | (opcode == 8'h11)) ? alu_result
-                                                                   : reg_data_b;
-    assign ram_addr = (stack_push | stack_pop) ? sp :
-                      src2_bypassed;
+    // THE ADDRESS BUG THAT WAS FIXED: reg_data_b used to be a REGISTER FILE
+    // output only, so on the very first STORE after an LI loaded the address
+    // register it still showed the OLD value and the store landed in the
+    // wrong cell. The forwarding muxes above (reg_a / reg_b) now resolve the
+    // fresh value combinationally, so the memory path simply uses them -
+    // no ALU bypass needed any more (that hack also mis-fired on PUSH).
+    assign ram_addr = (stack_push | stack_pop) ? sp : reg_b;
     // STORE / PUSH write R[src] (assembler puts the stored/pushed register in
     // the src field, and its address in src2); CALL writes the return address.
     // CALL pushes the RETURN ADDRESS (PC+1) at SP on the same edge it jumps
     // to the subroutine - see the fix note at ram_write_data below.
-    assign ram_data_in = (opcode == 8'h32) ? (pc_out + 16'b1) :  // CALL pushes PC+1
-                     reg_data_a;                                 // STORE/PUSH: R[src]
+    // CALL pushes the return address = (PC at fetch time) + 1. Because the
+    // PC register advances on EVERY clock, pc_out during the CALL's execute
+    // cycle already points past the CALL word... but only when nothing else
+    // redirected it. The robust source is the CALL's own fetch-time PC, which
+    // we capture alongside the instruction in ir_pc below.
+    assign ram_data_in = (opcode == 8'h32) ? ir_pc :  // CALL pushes return addr
+                         // (ir_pc already = CALL_PC+1: PC advanced at latch edge)
+                     reg_a;                                      // STORE/PUSH: R[src]
 
     // THE CALL-LATCH BUG THAT WAS FIXED: the old design routed the pushed
     // return address through reg_return_addr, a register latched during the
@@ -316,7 +428,13 @@ module cpu_top(
     // AT the return address slot (CALL wrote PC+1 to sp, then decremented).
     // Reading sp+1 returned an empty stack cell (x) and the PC went to hell.
     // Correct source for both POP and RET is therefore ram[sp] itself.
-    wire [15:0] ret_addr = ram_data_out;   // data_memory addr is ram_addr = sp on pop
+    
+    // THE CALL/RET FIX: data_memory has registered output (data_out updates on
+    // the clock edge), so ram_data_out during the RET cycle holds the value
+    // from the PREVIOUS cycle's address, not the current sp. We need to read
+    // from the CURRENT sp combinationally. Add a direct RAM read port for
+    // stack pops by accessing the RAM array hierarchically.
+    wire [15:0] ret_addr = ram_inst.ram[ram_addr];  // combinational read at current sp
 
     // Conditional jumps / CALL also latch their PC on the same edge that
     // changes SP or flags - that is fine here because none of them READ a
@@ -367,11 +485,6 @@ module cpu_top(
         .rx_ready(rx_ready)
     );
 
-    wire halt_instr = (raw_opcode == 8'h34);   // raw: opcode is NOP'd once halted
-    reg  halted_q;
-    reg  halt_arm;                             // one-shot so HALT runs exactly once
-    assign halted = halted_q;
-
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             halted_q <= 1'b0;
@@ -385,17 +498,5 @@ module cpu_top(
                 halted_q <= 1'b1;              // io_registers-style MMIO halt
         end
     end
-
-    wire g_clk_ok = ~halted_q & ~halt_instr;
-
-    wire reg_write_g   = reg_write_enable & g_clk_ok;
-    wire gpio_write_g  = gpio_write_enable & ram_write_op & g_clk_ok;
-    wire uart_start_g  = uart_we & ram_write_op & g_clk_ok;
-    wire ram_write_g   = actual_ram_write_enable & ram_write_op
-                         & ~gpio_write_enable & ~uart_we & g_clk_ok;
-    wire stack_push_g  = stack_push & g_clk_ok;
-    wire stack_pop_g   = stack_pop  & g_clk_ok;
-    wire flags_write_g = flags_write_final & g_clk_ok;
-    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
 
 endmodule
