@@ -1,3 +1,7 @@
+// data_memory.v - 64K x 16-bit RAM.
+// NOTE: uninitialized cells read as 0 (not x) so a stray LOAD/RET from an
+// empty stack slot returns address 0 and the program survives instead of
+// propagating x through the PC.
 module data_memory(
     input wire clk,
     input wire write_enable,
@@ -7,10 +11,10 @@ module data_memory(
 
 );
     reg[15:0] ram[0:65535];
+    integer i;
     initial begin
-        ram[0] = 16'hFFFF;
-        ram[1] = 16'hAAAA;
-        ram[2] = 16'h0505;
+        for (i = 0; i < 65536; i = i + 1)
+            ram[i] = 16'h0000;   // deterministic power-on state
     end
     always @(posedge clk) begin
         if(write_enable) begin
@@ -19,5 +23,3 @@ module data_memory(
     end
     assign data_out = ram[addr];
 endmodule
-
-

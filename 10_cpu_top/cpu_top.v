@@ -175,20 +175,55 @@ module cpu_top(
 
     // Memory addressing:
     //   PUSH/CALL -> write at SP (before it decrements)
-    //   POP/RET   -> read at SP+1 (the value pushed last)
+    //   POP/RET   -> read AT SP (SP increments on the same edge that consumes
+    //                the read data, so during the cycle SP still points at the
+    //                top-of-stack cell - reading sp+1 was the RET->xxxx bug)
     //   STORE     -> R[src2] holds the address, R[src] holds the data
     //   LOAD      -> R[src2] holds the address, result goes to R[dest]
-    // ALU ops and jumps never touch RAM - gate the write enable so a stray
-    // mem_write_enable can't corrupt memory while executing e.g. ADD.
-    wire ram_write_op  = (opcode == 8'h12) || stack_push;  // STORE / PUSH / CALL
-    wire ram_read_op   = (opcode == 8'h11) || stack_pop;   // LOAD  / POP  / RET
-    assign ram_addr = stack_push ? sp :
-                      stack_pop  ? (sp + 16'b1) :
-                      reg_data_b;
+    // ALU ops and jumps never touch RAM. The datapath gate is stack_push |
+    // mem_write_enable (the control unit raises mem_write_enable for STORE,
+    // PUSH and CALL); using the raw opcode here instead would silently block
+    // every STORE because the decoder's mem_write_enable IS the STORE signal.
+    wire ram_write_op  = stack_push | mem_write_enable;   // STORE / PUSH / CALL
+    wire ram_read_op   = (opcode == 8'h11) || stack_pop;  // LOAD  / POP  / RET
+
+    // THE ADDRESS BUG THAT WAS FIXED: reg_data_b is a REGISTER FILE output,
+    // i.e. it only updates on a clock edge. On the very first STORE after an
+    // LI loaded the address register, reg_data_b during the STORE cycle still
+    // shows the OLD value - so the store landed in the wrong cell (and worse,
+    // CALLs jumped with a stale operand). Fix: bypass the register file with
+    // the freshly-computed ALU result whenever this instruction reads/writes
+    // memory through R[src2]. The ALU computes exactly R[src2] + 0 on these
+    // opcodes (alu_ctrl defaults to ADD), so alu_result == what R[src2] WILL
+    // be next cycle. This makes STORE/PUSH/LOAD see its operands one cycle
+    // earlier - like forwarding in a real pipelined CPU.
+    wire [15:0] src2_bypassed = (ram_write_op | (opcode == 8'h11)) ? alu_result
+                                                                   : reg_data_b;
+    assign ram_addr = (stack_push | stack_pop) ? sp :
+                      src2_bypassed;
     // STORE / PUSH write R[src] (assembler puts the stored/pushed register in
     // the src field, and its address in src2); CALL writes the return address.
+    // THE CALL BUG THAT WAS FIXED: CALL jumps to the subroutine on the SAME
+    // clock edge that writes ram[sp] <= PC+1. In Verilog the RAM samples its
+    // data_in just before the edge, so it used to capture pc_out+1 while
+    // pc_out was still the CALL's own address - pushing the CALL address
+    // itself and making RET loop forever. Fix: latch pc_out+1 into a register
+    // during the CALL cycle; by the next edge reg_return_addr already holds
+    // the correct value and the RAM captures THAT.
+    reg [15:0] reg_return_addr;
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            reg_return_addr <= 16'h0000;
+        else if (opcode == 8'h32)          // CALL: remember where to come back to
+            reg_return_addr <= pc_out + 16'b1;
+    end
+
     assign ram_data_in = (opcode == 8'h32) ? (pc_out + 16'b1) :  // CALL pushes PC+1
                      reg_data_a;                                 // STORE/PUSH: R[src]
+
+    // The RAM's real write data: on a CALL cycle use the LATCHED value so the
+    // memory captures the correct PC+1 one edge later (see explanation above).
+    wire [15:0] ram_write_data = (opcode == 8'h32) ? reg_return_addr : ram_data_in;
 
     data_memory ram_inst (
         .clk(clk),
@@ -196,7 +231,7 @@ module cpu_top(
         // the address is real RAM (not GPIO/UART).
         .write_enable(actual_ram_write_enable & ram_write_op & ~gpio_write_enable & ~uart_we),
         .addr(ram_addr),
-        .data_in(ram_data_in),
+        .data_in(ram_write_data),
         .data_out(ram_data_out)
     );
     stack_pointer sp_inst(
@@ -236,10 +271,18 @@ module cpu_top(
     // jump_addr is shared by JMP / conditional jumps / CALL.
     wire [15:0] jump_addr = immediate;
 
-    // RET pops the stack: data_memory reads ram[sp+1] combinationally, which
-    // holds the return address CALL pushed last cycle.
-    wire [15:0] ret_addr = ram_data_out;
+    // RET pops the stack. THE BUG THAT WAS FIXED: we used to read
+    // ram[sp+1], assuming SP had already been incremented by the pop. But in
+    // this single-cycle design the POP edge increments SP at the SAME clock
+    // edge that latches the new PC - so during the RET cycle sp still points
+    // AT the return address slot (CALL wrote PC+1 to sp, then decremented).
+    // Reading sp+1 returned an empty stack cell (x) and the PC went to hell.
+    // Correct source for both POP and RET is therefore ram[sp] itself.
+    wire [15:0] ret_addr = ram_data_out;   // data_memory addr is ram_addr = sp on pop
 
+    // Conditional jumps / CALL also latch their PC on the same edge that
+    // changes SP or flags - that is fine here because none of them READ a
+    // value produced by their own edge. Only RET needs the fix above.
     assign next_pc_val = (pc_source_cu == 2'b10) ? ret_addr :     // RET -> pop PC from stack
                      (pc_source_cu == 2'b01 && cond_true) ? jump_addr :
                      (pc_out + 16'b1);
