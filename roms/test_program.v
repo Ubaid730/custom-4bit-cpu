@@ -39,7 +39,7 @@ module instruction_memory(
         mem[30] = 32'h00000000; // Address 30
         mem[31] = 32'h00000000; // Address 31
         mem[32] = 32'h00000000; // Address 32
-        mem[33] = 32'h01030000; // Address 33
+        mem[33] = 32'h01030100; // Address 33
         mem[34] = 32'h33000000; // Address 34
     end
 

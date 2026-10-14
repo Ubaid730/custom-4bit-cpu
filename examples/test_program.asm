@@ -39,5 +39,5 @@ NOP                 // 30
 NOP                 // 31
 NOP                 // 32
 ADD_ROUTINE:
-ADD R3, R0, R1      // 33: R3 = 10 + 43 = 0x35 (return-value convention)
+ADD R3, R0, R1      // 33: R3 = R0 + R1 = 10 + 43 = 0x35
 RET                 // 34: pops 19 -> PC

@@ -60,13 +60,13 @@ module control_unit(
             8'h07: begin // SHL  R[dest], imm4   (barrel shift left by immediate)
                 reg_write_enable = 1'b1;
                 alu_ctrl = 3'b110;
-                reg_in_source = 2'b01;    // ALU bypassed; writeback = instruction[3:0]
+                reg_in_source = 2'b00;    // writeback = barrel-shift result (cpu_top)
                 flags_write = 1'b1;
             end
             8'h08: begin // SHR  R[dest], imm4   (logical barrel shift right)
                 reg_write_enable = 1'b1;
                 alu_ctrl = 3'b111;
-                reg_in_source = 2'b01;
+                reg_in_source = 2'b00;    // writeback = barrel-shift result (cpu_top)
                 flags_write = 1'b1;
             end
             8'h09: begin // CMP (SUB but nobody writes the result!)

@@ -83,7 +83,6 @@ module cpu_top(
     // classify as a "read op" for the MMIO decoder.
     wire is_read_op = (opcode == 8'h11) || (opcode == 8'h31);
     
-    wire [15:0] next_pc_val;
     wire [15:0] sp;
     program_counter pc_inst (
         .clk(clk), .rst(rst),
@@ -117,24 +116,27 @@ module cpu_top(
         .data_in(reg_file_data_in),
         .read_addr_a(src_reg),
         .data_out_a(reg_data_a),
-        .read_addr_b(is_imm_op ? 4'b0000 : src2_reg),
+        .read_addr_b(is_addr_imm ? 4'b0000 : src2_reg),
         .data_out_b(reg_data_b),
         .read_addr_c(dest_reg),
         .data_out_c(reg_data_c)
     );
 
 
-    // ALU operand B comes from the right place depending on the instruction type:
-    // LI / jumps -> the 16-bit immediate field (the jump TARGET lives there,
-    //               and it must never leak into the ALU - that would spray
-    //               garbage flags all over the flag register).
-    // STORE/LOAD/PUSH/POP/CALL/RET -> R[src2] (the address lives there)
-    // everything else (ADD/SUB/AND...) -> R[src2] as the second operand too
-    wire [15:0] alu_b = (reg_in_source == 2'b01) ? immediate : reg_data_b;
+    // ALU operand selection.
+    // Operand A: SHL/SHR shift their SOURCE register (encoded in the src
+    // field), which is read by port A; every other op uses port A normally.
+    // Operand B: only ADDI-style ops (none today) would use the immediate;
+    // LI / jumps / CALL must NEVER feed their 16-bit operand into the ALU -
+    // that sprayed garbage Z/N flags all over the flag register and made
+    // later conditional jumps mis-branch (e.g. CALL's target 0x21 set N=1,
+    // and the next LOAD inherited those bogus flags).
+
+    wire is_shlshr = (opcode == 8'h07) || (opcode == 8'h08);
 
     alu alu_inst (
         .a(reg_data_a),
-        .b(alu_b),
+        .b(reg_data_b),
         .opcode(alu_ctrl),
         .result(alu_result),
         .zero_flag(zero_flag_raw),
@@ -144,34 +146,44 @@ module cpu_top(
     );
 
     // Which conditional jumps actually take the branch?
-    // They read the STORED flags - the flags latched by the instruction that
-    // ran last cycle (CMP / SUB / ADD / ...). In this single-cycle design a
-    // jump is fetched & executed while the previous instruction's flags have
-    // JUST landed in the flag register, so "CMP Rx, Ry" immediately followed
-    // by "JZ label" behaves exactly like a real processor.
+    // THE BRANCH-TIMING BUG THAT WAS FIXED: in this single-cycle core the
+    // flags produced by an ALU instruction are only latched into the flag
+    // register at the SAME clock edge that advances the PC past it. So when
+    // a jump sits right behind its CMP/SUB ("SUB R0,R1 / JZ DONE"), the
+    // STORED flags during the jump cycle are still the OLD ones - the JZ
+    // would sample stale state and mis-branch (this is what made the
+    // countdown stall). Real pipelines solve this with forwarding; we do it
+    // here by peeking at the RAW ALU flags whenever the PREVIOUS executed
+    // instruction raised flags_write (i.e. it was an ALU/CMP op), and
+    // falling back to the stored flags otherwise (NOPs/LIs between a CMP
+    // and its jump correctly preserve the latched flags).
     //
-    // THE BUG THAT WAS FIXED: previously the flag register latched on EVERY
-    // clock edge, so non-ALU instructions (LI, LOAD, jumps themselves...)
-    // overwrote the flags with garbage from the idle ALU inputs. Now the
-    // control unit raises `flags_write` only for instructions that really
-    // compute flags, and the flag register keeps its old value otherwise.
-    // That also means flags survive NOPs/LIs between a CMP and its jump.
-    //
-    // SECOND BUG THAT WAS FIXED: an UNTAKEN conditional jump used to fall
-    // through to PC+1 on the same edge that it zeroed the stored flags
-    // (the jump itself drives flags_write low via the mux below). A program
-    // like "SUB / JZ / JZ / JZ" would therefore lose Z after the first jump
-    // and never branch. Fix: any jump that does NOT latch preserves the
-    // flags it was testing, so consecutive conditional jumps all see them.
+    // IMPORTANT: the qualifier must come from a REGISTER holding the last
+    // executed opcode's flags_write. Using the CURRENT combinational
+    // flags_write wire instead creates a feedback loop: an untaken JZ keeps
+    // flags_write_final high (jump-preserve term), which makes the jump read
+    // the raw idle-ALU zero flag, which "takes" every JZ unconditionally.
+    // g_clk_ok is declared further down with the other write strobes.
+    wire [15:0] next_pc_val;
+    reg prev_flags_write;
+    always @(posedge clk or posedge rst) begin
+        if (rst) prev_flags_write <= 1'b0;
+        else     prev_flags_write <= flags_write & g_clk_ok;   // frozen during HALT
+    end
+
     wire is_jump_op = (opcode >= 8'h20) && (opcode <= 8'h26);
 
-    wire cond_true = (opcode == 8'h21) ? zero_flag_stored :         // JZ
-                     (opcode == 8'h22) ? ~zero_flag_stored :        // JNZ
-                     (opcode == 8'h23) ? carry_flag_stored :        // JC (borrow)
-                     (opcode == 8'h24) ? ~carry_flag_stored :       // JNC
-                     (opcode == 8'h25) ? negative_flag_stored :     // JN
-                     (opcode == 8'h26) ? ~negative_flag_stored :    // JNN
-                                         1'b1;                      // JMP always jumps
+    wire zero_eff     = prev_flags_write ? zero_flag_raw     : zero_flag_stored;
+    wire carry_eff    = prev_flags_write ? carry_flag_raw    : carry_flag_stored;
+    wire negative_eff = prev_flags_write ? negative_flag_raw : negative_flag_stored;
+
+    wire cond_true = (opcode == 8'h21) ? zero_eff :          // JZ
+                     (opcode == 8'h22) ? ~zero_eff :          // JNZ
+                     (opcode == 8'h23) ? carry_eff :          // JC (borrow)
+                     (opcode == 8'h24) ? ~carry_eff :         // JNC
+                     (opcode == 8'h25) ? negative_eff :       // JN
+                     (opcode == 8'h26) ? ~negative_eff :      // JNN
+                                         1'b1;                // JMP always jumps
 
     wire flags_write_final = flags_write | (is_jump_op & ~cond_true);
 
@@ -227,27 +239,19 @@ module cpu_top(
                       src2_bypassed;
     // STORE / PUSH write R[src] (assembler puts the stored/pushed register in
     // the src field, and its address in src2); CALL writes the return address.
-    // THE CALL BUG THAT WAS FIXED: CALL jumps to the subroutine on the SAME
-    // clock edge that writes ram[sp] <= PC+1. In Verilog the RAM samples its
-    // data_in just before the edge, so it used to capture pc_out+1 while
-    // pc_out was still the CALL's own address - pushing the CALL address
-    // itself and making RET loop forever. Fix: latch pc_out+1 into a register
-    // during the CALL cycle; by the next edge reg_return_addr already holds
-    // the correct value and the RAM captures THAT.
-    reg [15:0] reg_return_addr;
-    always @(posedge clk or posedge rst) begin
-        if (rst)
-            reg_return_addr <= 16'h0000;
-        else if (opcode == 8'h32)          // CALL: remember where to come back to
-            reg_return_addr <= pc_out + 16'b1;
-    end
-
+    // CALL pushes the RETURN ADDRESS (PC+1) at SP on the same edge it jumps
+    // to the subroutine - see the fix note at ram_write_data below.
     assign ram_data_in = (opcode == 8'h32) ? (pc_out + 16'b1) :  // CALL pushes PC+1
                      reg_data_a;                                 // STORE/PUSH: R[src]
 
-    // The RAM's real write data: on a CALL cycle use the LATCHED value so the
-    // memory captures the correct PC+1 one edge later (see explanation above).
-    wire [15:0] ram_write_data = (opcode == 8'h32) ? reg_return_addr : ram_data_in;
+    // THE CALL-LATCH BUG THAT WAS FIXED: the old design routed the pushed
+    // return address through reg_return_addr, a register latched during the
+    // CALL cycle. But the RAM also writes ON that same edge, so it captured
+    // the PREVIOUS value (0 at reset) instead of PC+1 - RET then returned to
+    // address 0 and the program looped forever. ram_data_in already carries
+    // the correct pc_out+1 combinationally DURING the CALL cycle, so feed
+    // the RAM directly; no latch needed.
+    wire [15:0] ram_write_data = ram_data_in;
 
     data_memory ram_inst (
         .clk(clk),
@@ -290,7 +294,13 @@ module cpu_top(
     // it a sub-choice: if the address sits in an MMIO window, take the
     // peripheral's combinational read data instead of the RAM cell.
     wire ram_or_io = (ram_addr >= 16'hFFF0) ? io_rd_data : ram_data_out;
-    assign reg_file_data_in = (reg_in_source == 2'b01) ? immediate :
+    // Barrel shifter: SHL/SHR R[dest], R[src], amount (amount in [7:0]).
+    wire [15:0] shlshr_result = (opcode == 8'h07) ?
+                                (reg_data_a << immediate[3:0]) :
+                                (reg_data_a >> immediate[3:0]);
+
+    assign reg_file_data_in = is_shlshr              ? shlshr_result :
+                              (reg_in_source == 2'b01) ? immediate :
                               (reg_in_source == 2'b10) ? ram_or_io :
                               alu_result;
 

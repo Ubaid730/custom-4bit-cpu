@@ -75,19 +75,25 @@ def assemble(input_file, output_file):
                     pass
 
                 elif mnemonic in reg_reg_ops:
-                    # ADD/SUB/... R[dest], R[src]  (R[src2] defaults to R[src])
+                    # ADD/SUB/... R[dest], R[src]        -> src2 field = R[src]
+                    #           R[dst], R[a], R[b]       -> dst = R[a] op R[b]
                     if len(parts) < 3: raise ValueError(f"{mnemonic} requires two operands")
-                    dest = registers[parts[1].upper()]
-                    src = registers[parts[2].upper()]
-                    src2 = src
+                    if len(parts) >= 4:
+                        dest = registers[parts[1].upper()]
+                        src  = registers[parts[2].upper()]
+                        src2 = registers[parts[3].upper()]
+                    else:
+                        dest = registers[parts[1].upper()]
+                        src  = registers[parts[2].upper()]
+                        src2 = src
 
                 elif mnemonic in reg_imm_ops:
-                    # SHL/SHR R[dest], R[src], amount
+                    # SHL/SHR R[dest], R[src], amount   (amount 0..15)
                     if len(parts) < 4: raise ValueError(f"{mnemonic} requires R[dest], R[src], amount")
                     dest = registers[parts[1].upper()]
-                    src = registers[parts[2].upper()]
-                    src2 = src
-                    imm = parse_num(parts[3]) & 0xFF
+                    src  = registers[parts[2].upper()]
+                    src2 = 0                     # cpu_top reads port C as the shift value
+                    imm  = parse_num(parts[3]) & 0xF
 
                 elif mnemonic == 'LI':
                     # LI R[dest], imm16
