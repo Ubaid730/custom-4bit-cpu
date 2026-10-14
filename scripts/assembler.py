@@ -14,7 +14,8 @@ def assemble(input_file, output_file):
         'LI': 0x10, 'LOAD': 0x11, 'STORE': 0x12,
         'JMP': 0x20, 'JZ': 0x21, 'JNZ': 0x22, 'JC': 0x23,
         'JNC': 0x24, 'JN': 0x25, 'JNN': 0x26,
-        'PUSH': 0x30, 'POP': 0x31, 'CALL': 0x32, 'RET': 0x33
+        'PUSH': 0x30, 'POP': 0x31, 'CALL': 0x32, 'RET': 0x33,
+        'HALT': 0x34
     }
 
     # R0..R15, all 4 bits wide now
@@ -70,7 +71,7 @@ def assemble(input_file, output_file):
             imm = 0
 
             try:
-                if mnemonic == 'NOP' or mnemonic == 'RET':
+                if mnemonic in ('NOP', 'RET', 'HALT'):
                     pass
 
                 elif mnemonic in reg_reg_ops:

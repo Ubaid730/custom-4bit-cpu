@@ -123,6 +123,11 @@ module control_unit(
                 stack_pop = 1'b1;
                 pc_source = 2'b10;
             end
+
+            8'h34: begin // HALT - freeze the machine (see cpu_top.v gating).
+                // No writes, no stack, PC stays put. The core parks here
+                // forever until reset. Equivalent to WFI on real cores.
+            end
             default: begin
                 // Defaults apply
             end

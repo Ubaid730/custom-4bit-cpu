@@ -1,6 +1,18 @@
+// cpu_top.v - the complete 16-bit CPU SoC core.
+//
+// Exposes the peripheral side-bands so a testbench (or real FPGA top-level)
+// can attach a console / LEDs without touching the internals:
+//   leds[15:0] : GPIO output register (STORE to 0xFFF0..0xFFFA)
+//   tx_out     : UART TX serial line  (STORE to 0xFFFB..0xFFFF)
+//   rx_in      : UART RX serial line  (LOAD from 0xFFFB after uart_rx sync)
+//   halted     : set when software STOREs bit0=1 to 0xFFFF (the HALT op)
 module cpu_top(
-    input wire clk,
-    input wire rst
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        rx_in,
+    output wire [15:0] leds,
+    output wire        tx_out,
+    output wire        halted
 );
 
 
@@ -58,12 +70,12 @@ module cpu_top(
     // registers only - but RET must be excluded here or it would wrongly
     // classify as a "read op" for the MMIO decoder.
     wire is_read_op = (opcode == 8'h11) || (opcode == 8'h31);
-    wire [15:0] gpio_leds;
+    
     wire [15:0] next_pc_val;
     wire [15:0] sp;
     program_counter pc_inst (
         .clk(clk), .rst(rst),
-        .next_pc(next_pc_val),
+        .next_pc(next_pc_g),
         .pc(pc_out)
     );
 
@@ -86,7 +98,7 @@ module cpu_top(
 
     register_file reg_file_inst (
         .clk(clk), .rst(rst),
-        .write_enable_global(reg_write_enable),
+        .write_enable_global(reg_write_g),
         // On LI / jumps / CALL the full 16-bit operand lives in [15:0];
         // src2[11:8] is part of that number, so it must not address a register.
         .write_addr(dest_reg),
@@ -153,7 +165,7 @@ module cpu_top(
 
     flags_register flags_inst (
         .clk(clk), .rst(rst),
-        .flags_write(flags_write_final),
+        .flags_write(flags_write_g),
         .zero_in(zero_flag_raw),
         .carry_in(carry_flag_raw),
         .overflow_in(overflow_flag_raw),
@@ -168,9 +180,9 @@ module cpu_top(
         .rst(rst),
         // Only a real STORE to the GPIO window lights the LEDs - never a stray
         // PUSH/CALL that happens to land in 0xFFF0..0xFFFA.
-        .write_enable(gpio_write_enable & ram_write_op),
+        .write_enable(gpio_write_g),
         .data_in(ram_data_in),
-        .leds(gpio_leds)
+        .leds(leds)
     );
 
     // Memory addressing:
@@ -229,7 +241,7 @@ module cpu_top(
         .clk(clk),
         // Only STORE/PUSH/CALL may write, and only when the MMIO decoder says
         // the address is real RAM (not GPIO/UART).
-        .write_enable(actual_ram_write_enable & ram_write_op & ~gpio_write_enable & ~uart_we),
+        .write_enable(ram_write_g),
         .addr(ram_addr),
         .data_in(ram_write_data),
         .data_out(ram_data_out)
@@ -237,8 +249,8 @@ module cpu_top(
     stack_pointer sp_inst(
         .clk(clk),
         .rst(rst),
-        .push(stack_push),
-        .pop(stack_pop),
+        .push(stack_push_g),
+        .pop(stack_pop_g),
         .sp(sp)
     );
     mmio_decoder mmio_inst(
@@ -255,15 +267,19 @@ module cpu_top(
     .clk(clk),
     .rst(rst),
     // a real STORE to the UART window starts a transmission
-    .tx_start(uart_we & ram_write_op),
+    .tx_start(uart_start_g),
     .tx_data(ram_data_in),
-    .tx_out(),
+    .tx_out(tx_out),
     .tx_busy(tx_busy)
 );
 
 
+    // Register-file writeback mux. Source 2'b10 normally means "RAM"; we give
+    // it a sub-choice: if the address sits in an MMIO window, take the
+    // peripheral's combinational read data instead of the RAM cell.
+    wire ram_or_io = (ram_addr >= 16'hFFF0) ? io_rd_data : ram_data_out;
     assign reg_file_data_in = (reg_in_source == 2'b01) ? immediate :
-                              (reg_in_source == 2'b10) ? ram_data_out :
+                              (reg_in_source == 2'b10) ? ram_or_io :
                               alu_result;
 
     // cond_true / flags_write_final are defined up near the flag register.
@@ -286,5 +302,70 @@ module cpu_top(
     assign next_pc_val = (pc_source_cu == 2'b10) ? ret_addr :     // RET -> pop PC from stack
                      (pc_source_cu == 2'b01 && cond_true) ? jump_addr :
                      (pc_out + 16'b1);
+
+
+    // =====================================================================
+    // HALT support (two flavours, both freeze every state element):
+    //   1. the HALT instruction (opcode 0x34) parks the core on its own PC;
+    //   2. STORE bit0=1 to 0xFFFF latches `halted_q` permanently (until
+    //      reset) - the MMIO "power switch" for monitors and OS panics.
+    // g_clk_ok is the "clock good" qualifier wired into PC, SP, register
+    // file, flags, RAM writes and all MMIO write strobes below.
+    // =====================================================================
+    // =====================================================================
+    // System / status registers (io_registers.v) + UART receiver (uart_rx.v)
+    // LOADs aimed at the UART/system window answer combinationally:
+    //   0xFFFB rx byte | 0xFFFC {_,_,rx_ready,tx_busy} | 0xFFFD cycle counter
+    //   0xFFFF signature bit0=1.  This is what poll loops in bootloaders use.
+    // =====================================================================
+    wire is_gpio_addr = (ram_addr >= 16'hFFF0) && (ram_addr <= 16'hFFFA);
+    wire io_rd_en     = (opcode == 8'h11) && ~is_gpio_addr;   // LOAD into UART/sys win
+    wire [15:0] io_rd_data;
+
+    io_registers io_inst(
+        .clk(clk), .rst(rst),
+        .addr(ram_addr),
+        .rd_en(io_rd_en),
+        .sys_we(1'b0),              // halt is decoded directly below (halted_q)
+        .wr_data(ram_data_in),
+        .tx_busy(tx_busy),
+        .rx_ready(rx_ready),
+        .rx_byte(rx_byte),
+        .rd_data(io_rd_data),
+        .halt()                     // unused output; cpu_top owns halted_q
+    );
+
+    // UART receiver: lets a monitor/bootloader poll 0xFFFC bit1 then read 0xFFFB.
+    wire [7:0] rx_byte;
+    wire       rx_ready;
+    uart_rx rxuart_inst(
+        .clk(clk), .rst(rst),
+        .rx_in(rx_in),
+        .rx_byte(rx_byte),
+        .rx_ready(rx_ready)
+    );
+
+    wire halt_instr = (opcode == 8'h34);
+    reg  halted_q;
+    assign halted = halted_q;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            halted_q <= 1'b0;
+        else if (ram_write_op && uart_we && ram_addr == 16'hFFFF && ram_data_in[0])
+            halted_q <= 1'b1;             // io_registers-style MMIO halt
+    end
+
+    wire g_clk_ok = ~halted_q & ~halt_instr;
+
+    wire reg_write_g   = reg_write_enable & g_clk_ok;
+    wire gpio_write_g  = gpio_write_enable & ram_write_op & g_clk_ok;
+    wire uart_start_g  = uart_we & ram_write_op & g_clk_ok;
+    wire ram_write_g   = actual_ram_write_enable & ram_write_op
+                         & ~gpio_write_enable & ~uart_we & g_clk_ok;
+    wire stack_push_g  = stack_push & g_clk_ok;
+    wire stack_pop_g   = stack_pop  & g_clk_ok;
+    wire flags_write_g = flags_write_final & g_clk_ok;
+    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
 
 endmodule

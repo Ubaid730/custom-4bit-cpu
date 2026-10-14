@@ -12,7 +12,8 @@ module tb_full_cpu();
 
     cpu_top uut (
         .clk(clk),
-        .rst(rst)
+        .rst(rst),
+        .rx_in(1'b1)
     );
 
     always #5 clk = ~clk;
@@ -47,7 +48,7 @@ module tb_full_cpu();
         // remaining instructions each burn one 10ns cycle; park loop reached ~#120 later
         #200;
         expect16(uut.reg_file_inst.reg_out_3, 16'h0035, "R3 after STORE/LOAD roundtrip");
-        expect16(uut.gpio_leds,               16'h000A, "GPIO LEDs from MMIO STORE");
+        expect16(uut.leds,               16'h000A, "GPIO LEDs from MMIO STORE");
         expect16(uut.reg_file_inst.reg_out_5, 16'h0000, "R5 restored by POP");
         expect16(uut.sp,                      16'hFFFE, "SP back to reset value");
         expect16(uut.pc_out,                  16'h001C, "PC parked in halt loop");
