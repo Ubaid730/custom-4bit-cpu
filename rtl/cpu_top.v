@@ -109,7 +109,7 @@ module cpu_top(
 
     register_file reg_file_inst (
         .clk(clk), .rst(rst),
-        .write_enable_global(reg_write_g),
+        .write_enable_global(reg_write_enable),   // ungated: HALT never sets it
         // On LI / jumps / CALL the full 16-bit operand lives in [15:0];
         // src2[11:8] is part of that number, so it must not address a register.
         .write_addr(dest_reg),
@@ -122,22 +122,39 @@ module cpu_top(
         .data_out_c(reg_data_c)
     );
 
-
     // ALU operand selection.
-    // Operand A: SHL/SHR shift their SOURCE register (encoded in the src
-    // field), which is read by port A; every other op uses port A normally.
-    // Operand B: only ADDI-style ops (none today) would use the immediate;
-    // LI / jumps / CALL must NEVER feed their 16-bit operand into the ALU -
-    // that sprayed garbage Z/N flags all over the flag register and made
-    // later conditional jumps mis-branch (e.g. CALL's target 0x21 set N=1,
-    // and the next LOAD inherited those bogus flags).
-
+    // SHL/SHR are barrel shifts by a 4-bit amount taken from imm[3:0]; they
+    // bypass the ALU entirely (see shlshr_result / the writeback mux below),
+    // so we force alu_ctrl to ADD for them - otherwise the idle ALU computed
+    // garbage Z/N/C flags into the flag register and corrupted the countdown
+    // JZ decisions.
+    // LI / jumps / CALL must NEVER feed their 16-bit operand into the ALU
+    // either - same garbage-flag reason (any big target sets N/Z and the
+    // NEXT conditional branch mis-fires). Forcing alu_ctrl=ADD with b=0
+    // keeps the flags honest.
     wire is_shlshr = (opcode == 8'h07) || (opcode == 8'h08);
+    wire [2:0] alu_ctrl_final = (is_shlshr | is_addr_imm) ? 3'b000 : alu_ctrl;
+
+    // THE STALE-READ BUG THAT WAS FIXED: register-file outputs are clocked
+    // registers, so on the cycle right after an LI the read ports still show
+    // the OLD value (no forwarding existed). That made SUB R0,R1 compute with
+    // R1=0 (countdown never decremented), STORE write to a stale address,
+    // PUSH store garbage, and CALL jump to PC+1 instead of its label. Fix:
+    // forward combinationally - if a port addresses the register being
+    // written THIS cycle, it shows reg_file_data_in immediately. The write
+    // data comes from the fully combinational mux at the bottom of this
+    // file, so no loop exists. When reg_write_enable is low the stored
+    // values are already up-to-date, so the raw wires are correct there too.
+    wire [15:0] reg_a = (reg_write_enable && (dest_reg == src_reg))
+                        ? reg_file_data_in : reg_data_a;
+    wire [15:0] reg_b_raw = is_addr_imm ? 16'b0 : reg_data_b;
+    wire [15:0] reg_b = (reg_write_enable && !is_addr_imm && (dest_reg == src2_reg))
+                        ? reg_file_data_in : reg_b_raw;
 
     alu alu_inst (
-        .a(reg_data_a),
-        .b(reg_data_b),
-        .opcode(alu_ctrl),
+        .a(reg_a),
+        .b(reg_b),
+        .opcode(alu_ctrl_final),
         .result(alu_result),
         .zero_flag(zero_flag_raw),
         .carry_flag(carry_flag_raw),
@@ -165,17 +182,43 @@ module cpu_top(
     // the raw idle-ALU zero flag, which "takes" every JZ unconditionally.
     // g_clk_ok is declared further down with the other write strobes.
     wire [15:0] next_pc_val;
-    reg prev_flags_write;
+    reg         prev_flags_write;   // did the LAST executed instruction set flags?
+    reg  [15:0] prev_zero, prev_carry, prev_negative;  // ...and what were they?
+
     always @(posedge clk or posedge rst) begin
-        if (rst) prev_flags_write <= 1'b0;
-        else     prev_flags_write <= flags_write & g_clk_ok;   // frozen during HALT
+        if (rst) begin
+            prev_flags_write <= 1'b0;
+            prev_zero        <= 1'b0;
+            prev_carry       <= 1'b0;
+            prev_negative    <= 1'b0;
+        end else begin
+            // Capture the RAW flag values on every cycle so that when the
+            // NEXT instruction (a conditional jump) executes, prev_* already
+            // holds the flags produced by the ALU op we just ran. This is
+            // the forwarding path for branch decisions.
+            prev_flags_write <= flags_write & g_clk_ok;   // frozen during HALT
+            prev_zero        <= zero_flag_raw;
+            prev_carry       <= carry_flag_raw;
+            prev_negative    <= negative_flag_raw;
+        end
     end
 
     wire is_jump_op = (opcode >= 8'h20) && (opcode <= 8'h26);
 
-    wire zero_eff     = prev_flags_write ? zero_flag_raw     : zero_flag_stored;
-    wire carry_eff    = prev_flags_write ? carry_flag_raw    : carry_flag_stored;
-    wire negative_eff = prev_flags_write ? negative_flag_raw : negative_flag_stored;
+    // THE BRANCH-TIMING BUG THAT WAS FIXED: in this single-cycle core the
+    // flags produced by an ALU instruction are only latched into the flag
+    // register at the SAME clock edge that advances the PC past it. So when
+    // a jump sits right behind its CMP/SUB ("SUB R0,R1 / JZ DONE"), the
+    // STORED flags during the jump cycle are still the OLD ones - the JZ
+    // would sample stale state and mis-branch (this is what made the
+    // countdown stall). Real pipelines solve this with forwarding; we do it
+    // here by peeking at the PREV-CYCLE raw flags whenever the PREVIOUS
+    // executed instruction raised flags_write (i.e. it was an ALU/CMP op),
+    // and falling back to the stored flags otherwise (NOPs/LIs between a
+    // CMP and its jump correctly preserve the latched flags).
+    wire zero_eff     = prev_flags_write ? prev_zero     : zero_flag_stored;
+    wire carry_eff    = prev_flags_write ? prev_carry    : carry_flag_stored;
+    wire negative_eff = prev_flags_write ? prev_negative : negative_flag_stored;
 
     wire cond_true = (opcode == 8'h21) ? zero_eff :          // JZ
                      (opcode == 8'h22) ? ~zero_eff :          // JNZ
@@ -223,26 +266,19 @@ module cpu_top(
     wire ram_write_op  = stack_push | mem_write_enable;   // STORE / PUSH / CALL
     wire ram_read_op   = (opcode == 8'h11) || stack_pop;  // LOAD  / POP  / RET
 
-    // THE ADDRESS BUG THAT WAS FIXED: reg_data_b is a REGISTER FILE output,
-    // i.e. it only updates on a clock edge. On the very first STORE after an
-    // LI loaded the address register, reg_data_b during the STORE cycle still
-    // shows the OLD value - so the store landed in the wrong cell (and worse,
-    // CALLs jumped with a stale operand). Fix: bypass the register file with
-    // the freshly-computed ALU result whenever this instruction reads/writes
-    // memory through R[src2]. The ALU computes exactly R[src2] + 0 on these
-    // opcodes (alu_ctrl defaults to ADD), so alu_result == what R[src2] WILL
-    // be next cycle. This makes STORE/PUSH/LOAD see its operands one cycle
-    // earlier - like forwarding in a real pipelined CPU.
-    wire [15:0] src2_bypassed = (ram_write_op | (opcode == 8'h11)) ? alu_result
-                                                                   : reg_data_b;
-    assign ram_addr = (stack_push | stack_pop) ? sp :
-                      src2_bypassed;
+    // THE ADDRESS BUG THAT WAS FIXED: reg_data_b used to be a REGISTER FILE
+    // output only, so on the very first STORE after an LI loaded the address
+    // register it still showed the OLD value and the store landed in the
+    // wrong cell. The forwarding muxes above (reg_a / reg_b) now resolve the
+    // fresh value combinationally, so the memory path simply uses them -
+    // no ALU bypass needed any more (that hack also mis-fired on PUSH).
+    assign ram_addr = (stack_push | stack_pop) ? sp : reg_b;
     // STORE / PUSH write R[src] (assembler puts the stored/pushed register in
     // the src field, and its address in src2); CALL writes the return address.
     // CALL pushes the RETURN ADDRESS (PC+1) at SP on the same edge it jumps
     // to the subroutine - see the fix note at ram_write_data below.
     assign ram_data_in = (opcode == 8'h32) ? (pc_out + 16'b1) :  // CALL pushes PC+1
-                     reg_data_a;                                 // STORE/PUSH: R[src]
+                     reg_a;                                      // STORE/PUSH: R[src]
 
     // THE CALL-LATCH BUG THAT WAS FIXED: the old design routed the pushed
     // return address through reg_return_addr, a register latched during the

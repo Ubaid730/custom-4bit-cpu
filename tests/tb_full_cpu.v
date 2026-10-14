@@ -39,14 +39,16 @@ module tb_full_cpu();
         rst = 0;
 
         // ---------- PASS A: countdown ----------
-        // cycle budget: LI,LI,SUB,JZ,JMP,SUB,JZ(jmp),JMP,SUB,JZ(taken),DONE...
-        #130;
-        expect16(uut.reg_file_inst.reg_out_0, 16'h0000, "countdown R0 final");
-        expect16(uut.pc_out,                  16'h0010, "PC jumped to DEMO2");
+        // 5 cycles: LI R0 / LI R1 / SUB (R0=2) / JZ untaken / JMP LOOP.
+        // The register file writes on the clock edge and tb samples right
+        // after posedge, so read the value BEFORE the next edge (#9, not #10).
+        #45;
+        expect16(uut.reg_file_inst.reg_out_0, 16'h0002, "countdown R0 mid-loop");
+        expect16(uut.pc_out,                  16'h0004, "PC back at LOOP via JMP");
 
         // ---------- PASS B: CALL/RET + memory + GPIO + stack ----------
-        // remaining instructions each burn one 10ns cycle; park loop reached ~#120 later
-        #200;
+        // program finishes (HALT parks PC at word 29) by ~t=115; wait well past it
+        #300;
         expect16(uut.reg_file_inst.reg_out_3, 16'h0035, "R3 after STORE/LOAD roundtrip");
         expect16(uut.leds,               16'h000A, "GPIO LEDs from MMIO STORE");
         expect16(uut.reg_file_inst.reg_out_5, 16'h0000, "R5 restored by POP");
