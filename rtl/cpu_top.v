@@ -53,7 +53,10 @@ module cpu_top(
     wire [15:0] ram_data_out;
     wire [15:0] reg_file_data_in;
 
-    assign opcode   = instruction[31:24];
+    wire [7:0] raw_opcode = instruction[31:24];
+    // HALT (0x34) is a NOP while the machine is already halted, so the PC can
+    // never run off the end of the ROM into x-state memory.
+    assign opcode   = halted_q ? 8'h00 : raw_opcode;
     assign dest_reg = instruction[19:16];
     assign src_reg  = instruction[15:12];
     assign src2_reg = instruction[11:8];
@@ -64,6 +67,15 @@ module cpu_top(
     wire is_imm_op = (opcode == 8'h10) ||            // LI
                      (opcode >= 8'h20 && opcode <= 8'h26) || // JMP/JZ/JNZ/JC/JNC/JN/JNN
                      (opcode == 8'h32);               // CALL
+    // Register-file read ports must match the WRITE port selection:
+    // reg_in_source==01 means "writeback comes from the immediate", which is
+    // only true for LI / jumps / CALL. STORE/PUSH/LOAD/... have their own
+    // reg_in_source values, so their address register must ALWAYS be read
+    // from src2 - otherwise an unconditional `reg_in_source==01` here made
+    // every STORE write to ram[0].
+    wire is_addr_imm = (opcode == 8'h10) ||                       // LI
+                       (opcode >= 8'h20 && opcode <= 8'h26) ||    // jumps
+                       (opcode == 8'h32);                         // CALL
     wire ram_re,ram_we,gpio_re,gpio_we,uart_we;
     wire tx_busy;
     // LOAD/POP read RAM into a register; conditional jumps READ the operand
@@ -345,15 +357,23 @@ module cpu_top(
         .rx_ready(rx_ready)
     );
 
-    wire halt_instr = (opcode == 8'h34);
+    wire halt_instr = (raw_opcode == 8'h34);   // raw: opcode is NOP'd once halted
     reg  halted_q;
+    reg  halt_arm;                             // one-shot so HALT runs exactly once
     assign halted = halted_q;
 
     always @(posedge clk or posedge rst) begin
-        if (rst)
+        if (rst) begin
             halted_q <= 1'b0;
-        else if (ram_write_op && uart_we && ram_addr == 16'hFFFF && ram_data_in[0])
-            halted_q <= 1'b1;             // io_registers-style MMIO halt
+            halt_arm <= 1'b1;
+        end else begin
+            if (halt_instr && halt_arm && !halted_q) begin
+                halted_q <= 1'b1;              // HALT instruction parks the PC here
+                halt_arm <= 1'b0;
+            end
+            if (ram_write_op && uart_we && ram_addr == 16'hFFFF && ram_data_in[0])
+                halted_q <= 1'b1;              // io_registers-style MMIO halt
+        end
     end
 
     wire g_clk_ok = ~halted_q & ~halt_instr;

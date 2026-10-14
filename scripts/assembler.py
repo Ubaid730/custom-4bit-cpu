@@ -155,7 +155,7 @@ def assemble(input_file, output_file):
         f.write("    initial begin\n")
 
         for i, word in enumerate(instructions):
-            f.write(f"        mem[{i}] = 32'h{word:04X}_{word & 0xFFFF:04X}; // Address {i}\n")
+            f.write(f"        mem[{i}] = 32'h{word:08X}; // Address {i}\n")
 
         f.write("    end\n\n")
         f.write("    assign instruction = mem[addr];\n")
