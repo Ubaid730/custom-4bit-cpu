@@ -70,16 +70,7 @@ module cpu_top(
     wire halt_instr = (raw_opcode == 8'h34);   // raw: opcode is NOP'd once halted
     wire g_clk_ok = ~halted_q & ~halt_instr;
     
-    // Forward-declare gated signals used throughout this module
-    wire reg_write_g   = reg_write_enable & g_clk_ok;
-    wire gpio_write_g  = gpio_write_enable & ram_write_op & g_clk_ok;
-    wire uart_start_g  = uart_we & ram_write_op & g_clk_ok;
-    wire ram_write_g   = actual_ram_write_enable & ram_write_op
-                         & ~gpio_write_enable & ~uart_we & g_clk_ok;
-    wire stack_push_g  = stack_push & g_clk_ok;
-    wire stack_pop_g   = stack_pop  & g_clk_ok;
-    wire flags_write_g = flags_write_final & g_clk_ok;
-    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
+// (gated write strobes moved below, after their sources are declared)
     
     // HALT (0x34) is a NOP while the machine is already halted, so the PC can
     // never run off the end of the ROM into x-state memory.
@@ -138,6 +129,7 @@ module cpu_top(
     reg [3:0]  ir_dest, ir_src, ir_src2;
     reg [15:0] ir_imm;
     reg [15:0] ir_pc;             // PC of the latched word (for CALL return addr)
+    reg [15:0] ir_pc_next;        // ir_pc+1 precomputed at latch time
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -147,6 +139,7 @@ module cpu_top(
             ir_src2   <= 4'b0000;
             ir_imm    <= 16'b0;
             ir_pc     <= 16'b0;
+            ir_pc_next <= 16'b1;
         end else begin
             ir_opcode <= halted_q ? 8'h00 : opcode_f;
             ir_dest   <= dest_f;
@@ -155,6 +148,7 @@ module cpu_top(
             ir_imm    <= immediate_f;
             ir_pc     <= pc_out;   // pc_out IS the address of the word being
                                    // presented by the ROM this very moment
+            ir_pc_next <= pc_out + 16'b1;  // return address if THIS word is a CALL
         end
     end
 
@@ -312,6 +306,8 @@ module cpu_top(
         .overflow_out(overflow_flag_stored),
         .negative_out(negative_flag_stored)
     );
+    // Forward-declare gated signals used throughout this module
+
     gpio gpio_inst(
         .clk(clk),
         .rst(rst),
@@ -334,6 +330,17 @@ module cpu_top(
     // PUSH and CALL); using the raw opcode here instead would silently block
     // every STORE because the decoder's mem_write_enable IS the STORE signal.
     wire ram_write_op  = stack_push | mem_write_enable;   // STORE / PUSH / CALL
+
+    wire reg_write_g   = reg_write_enable & g_clk_ok;
+    wire gpio_write_g  = gpio_write_enable & ram_write_op & g_clk_ok;
+    wire uart_start_g  = uart_we & ram_write_op & g_clk_ok;
+    wire ram_write_g   = actual_ram_write_enable & ram_write_op
+                         & ~gpio_write_enable & ~uart_we & g_clk_ok;
+    wire stack_push_g  = stack_push & g_clk_ok;
+    wire stack_pop_g   = stack_pop  & g_clk_ok;
+    wire flags_write_g = flags_write_final & g_clk_ok;
+    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
+
     wire ram_read_op   = (opcode == 8'h11) || stack_pop;  // LOAD  / POP  / RET
 
     // THE ADDRESS BUG THAT WAS FIXED: reg_data_b used to be a REGISTER FILE
@@ -352,8 +359,7 @@ module cpu_top(
     // cycle already points past the CALL word... but only when nothing else
     // redirected it. The robust source is the CALL's own fetch-time PC, which
     // we capture alongside the instruction in ir_pc below.
-    assign ram_data_in = (opcode == 8'h32) ? ir_pc :  // CALL pushes return addr
-                         // (ir_pc already = CALL_PC+1: PC advanced at latch edge)
+        assign ram_data_in = (opcode == 8'h32) ? ir_pc_next :  // CALL pushes return addr
                      reg_a;                                      // STORE/PUSH: R[src]
 
     // THE CALL-LATCH BUG THAT WAS FIXED: the old design routed the pushed

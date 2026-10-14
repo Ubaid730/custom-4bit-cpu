@@ -8,7 +8,7 @@ module instruction_memory(
     initial begin
         mem[0] = 32'h10000003; // Address 0
         mem[1] = 32'h10010001; // Address 1
-        mem[2] = 32'h02001100; // Address 2
+        mem[2] = 32'h02000100; // Address 2
         mem[3] = 32'h21000006; // Address 3
         mem[4] = 32'h20000002; // Address 4
         mem[5] = 32'h00000000; // Address 5
@@ -30,7 +30,7 @@ module instruction_memory(
         mem[21] = 32'h12003200; // Address 21
         mem[22] = 32'h10030000; // Address 22
         mem[23] = 32'h11030200; // Address 23
-        mem[24] = 32'h1004FFF0; // Address 24
+        mem[24] = 32'h1004FFF8; // Address 24
         mem[25] = 32'h12000400; // Address 25
         mem[26] = 32'h30005000; // Address 26
         mem[27] = 32'h100500FF; // Address 27

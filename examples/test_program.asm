@@ -5,7 +5,7 @@
 LI R0, 3            // 0: counter
 LI R1, 1            // 1: step
 LOOP:
-SUB R0, R1          // 2: R0 -= 1, sets Z
+SUB R0, R0, R1      // 2: R0 -= 1, sets Z
 JZ DONE             // 3
 JMP LOOP            // 4
 NOP                 // 5
@@ -29,7 +29,7 @@ LI R3, 0x35         // 20: value to store
 STORE R3, R2        // 21: ram[0xFF00] = 0x35
 LI R3, 0            // 22: clear R3
 LOAD R3, R2         // 23: round-trip - must read back 0x35
-LI R4, 0xFFF0       // 24: GPIO address
+LI R4, 0xFFF8       // 24: GPIO address
 STORE R0, R4        // 25: leds = 10
 PUSH R5             // 26: save R5 (=0)
 LI R5, 0xFF         // 27: scribble on R5

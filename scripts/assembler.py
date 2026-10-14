@@ -107,14 +107,17 @@ def assemble(input_file, output_file):
                     imm = parse_num(parts[2]) & 0xFFFF
 
                 elif mnemonic in reg_reg_dest:
-                    # LOAD R[dest], R[src2]  /  STORE R[src], R[src2]
+                    # LOAD R[dest], R[src2]  /  R[dest], [R[src2]]
+                    # STORE R[src],  R[src2] / R[src],  [R[src2]]
                     if len(parts) < 3: raise ValueError(f"{mnemonic} requires two operands")
+                    def strip_brackets(tok):
+                        return tok.replace('[', '').replace(']', '').upper()
                     if mnemonic == 'LOAD':
-                        dest = registers[parts[1].upper()]
-                        src2 = registers[parts[2].upper()]
+                        dest = registers[strip_brackets(parts[1])]
+                        src2 = registers[strip_brackets(parts[2])]
                     else:
-                        src = registers[parts[1].upper()]
-                        src2 = registers[parts[2].upper()]
+                        src = registers[strip_brackets(parts[1])]
+                        src2 = registers[strip_brackets(parts[2])]
 
                 elif mnemonic in reg_only_ops:
                     # PUSH R[src] / POP R[dest]
