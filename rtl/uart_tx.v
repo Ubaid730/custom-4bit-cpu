@@ -52,10 +52,4 @@ module uart_tx(
     end
 
 
-    always @(negedge tx_busy) begin
-        if (!tx_busy)
-            $display("[UART TX] Sent: 16'h%h", tx_data);
-    end
-
-
 endmodule

@@ -53,50 +53,40 @@ module cpu_top(
     wire [15:0] ram_data_out;
     wire [15:0] reg_file_data_in;
 
-    wire [7:0] raw_opcode = instruction[31:24];
-    
+    // =====================================================================
+    // FETCH STAGE wires (raw ROM word fields, indexed by pc_out)
+    // =====================================================================
+    wire [7:0]  opcode_f    = instruction[31:24];
+    wire [3:0]  dest_f      = instruction[19:16];
+    wire [3:0]  src_f       = instruction[15:12];
+    wire [3:0]  src2_f      = instruction[11:8];
+    wire [15:0] immediate_f = instruction[15:0];
+
     // =====================================================================
     // HALT support (two flavours, both freeze every state element):
     //   1. the HALT instruction (opcode 0x34) parks the core on its own PC;
-    //   2. STORE bit0=1 to 0xFFFF latches `halted_q` permanently (until
+    //   2. STORE bit0=1 to 0xFFFF latches `mmio_halt` permanently (until
     //      reset) - the MMIO "power switch" for monitors and OS panics.
     // g_clk_ok is the "clock good" qualifier wired into PC, SP, register
     // file, flags, RAM writes and all MMIO write strobes below.
     // =====================================================================
-    reg  halted_q;
-    reg  halt_arm;                             // one-shot so HALT runs exactly once
+    reg  halted_q;      // one-shot: set by the HALT instruction OR an MMIO
+                        // STORE bit0=1 to 0xFFFF; cleared only by reset.
     assign halted = halted_q;
-    
-    // HALT is decoded from the LATCHED execute-stage opcode, not the raw ROM
-    // wire. Decoding raw_opcode froze the PC one word too early and, after
-    // parking, the frozen fetch kept re-decoding the same HALT forever so
-    // the core could never settle into NOP (vvp event-thread livelock).
-    wire halt_instr = (ir_opcode == 8'h34);
-    wire g_clk_ok   = ~halted_q & ~halt_instr;
-    
-// (gated write strobes are defined once all their sources exist,
-// see the block after the flag register instantiation)
-    
-    // HALT (0x34) is a NOP while the machine is already halted, so the PC can
-    // never run off the end of the ROM into x-state memory.
-    wire [7:0]  opcode_f   = instruction[31:24];
-    wire [3:0]  dest_f     = instruction[19:16];
-    wire [3:0]  src_f      = instruction[15:12];
-    wire [3:0]  src2_f     = instruction[11:8];
-    wire [15:0] immediate_f = instruction[15:0];
+    // g_clk_ok is the master "clock good" qualifier: when the core parks it
+    // freezes the PC, the IR latch, the flags, SP, RAM/GPIO/UART write
+    // strobes - everything. It is deliberately built ONLY from registered
+    // state (halted_q), never from the combinational decode of the IR, so no
+    // path through the latch enable can loop back into the latch's own data
+    // input (a combinational halt_instr here was the zero-delay feedback
+    // that livelocked vvp the moment a program reached HALT).
+    wire g_clk_ok = ~halted_q;
+
     // LI / jumps / CALL use the FULL 16-bit operand field [15:0]:
     //   dest lives in [19:16] (harmless overlap with the imm's high byte)
-    //   src2  must be forced to 0 so it doesn't alias into the immediate
-
-    wire is_imm_op = (opcode == 8'h10) ||            // LI
-                     (opcode >= 8'h20 && opcode <= 8'h26) || // JMP/JZ/JNZ/JC/JNC/JN/JNN
-                     (opcode == 8'h32);               // CALL
-    // Register-file read ports must match the WRITE port selection:
-    // reg_in_source==01 means "writeback comes from the immediate", which is
-    // only true for LI / jumps / CALL. STORE/PUSH/LOAD/... have their own
-    // reg_in_source values, so their address register must ALWAYS be read
-    // from src2 - otherwise an unconditional `reg_in_source==01` here made
-    // every STORE write to ram[0].
+    //   src/src2 must be forced to 0 so they don't alias into the immediate.
+    // Register-file read port B therefore reads R0 for these ops instead of
+    // whatever the immediate's high nibble happens to name.
     wire is_addr_imm = (opcode == 8'h10) ||                       // LI
                        (opcode >= 8'h20 && opcode <= 8'h26) ||    // jumps
                        (opcode == 8'h32);                         // CALL
@@ -106,8 +96,24 @@ module cpu_top(
     // registers only - but RET must be excluded here or it would wrongly
     // classify as a "read op" for the MMIO decoder.
     wire is_read_op = (opcode == 8'h11) || (opcode == 8'h31);
-    
+
+    // =====================================================================
+    // PROGRAM COUNTER + INSTRUCTION ROM.
+    // The PC advances from next_pc_g EVERY cycle (no stalls).  Branches are
+    // resolved one cycle after the flag-producing ALU op latched its flags,
+    // which is exactly when the jump sits in the execute stage - so no
+    // bubble is needed anywhere.  HALT parks the machine: `halted` freezes
+    // the PC, the IR latch and every write strobe forever.
+    // =====================================================================
     wire [15:0] sp;
+    wire [15:0] next_pc_val;                   // computed near the bottom
+    wire        halt_instr;                    // decoded from the latched IR
+    // NOTE: during the execute cycle the PC register already shows fetch-PC+2
+    // (the IR latch and PC advance on the same edge).  Sequential next-PC is
+    // computed from the CAPTURED fetch address (ir_pc_next+1), never from the
+    // live pc_out - see next_pc_val at the bottom of this file.
+    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;
+
     program_counter pc_inst (
         .clk(clk), .rst(rst),
         .next_pc(next_pc_g),
@@ -125,10 +131,11 @@ module cpu_top(
     // the datapath decoded the LIVE instruction wire every operation would
     // run one word off (this was the root cause behind SUB computing R1-R1,
     // POP restoring wrong values and RET jumping to garbage). We therefore
-    // capture each fetched word into ir_* on the same posedge that advances
-    // the PC, and decode/execute ONLY from those latched fields. HALT parks
-    // the machine: when frozen we stop latching and force the executed
-    // opcode to NOP so no write strobe can fire.
+    // capture each fetched word into ir_* on the same edge that advances
+    // the PC, and decode/execute ONLY from those latched fields. Once the
+    // core halts we stop latching entirely; the parked HALT word itself is
+    // neutralised by forcing the executed opcode to NOP (see halt_instr
+    // interaction below) so no write strobe can ever fire again.
     // =====================================================================
     reg [7:0]  ir_opcode;
     reg [3:0]  ir_dest, ir_src, ir_src2;
@@ -143,8 +150,8 @@ module cpu_top(
             ir_src2   <= 4'b0000;
             ir_imm    <= 16'b0;
             ir_pc_next <= 16'b1;
-        end else begin
-            ir_opcode <= halted_q ? 8'h00 : opcode_f;
+        end else if (g_clk_ok) begin
+            ir_opcode <= opcode_f;
             ir_dest   <= dest_f;
             ir_src    <= src_f;
             ir_src2   <= src2_f;
@@ -159,6 +166,13 @@ module cpu_top(
     assign src_reg   = ir_src;
     assign src2_reg  = ir_src2;
     assign immediate = ir_imm;
+
+    // HALT is decoded from the LATCHED execute-stage opcode, not the raw ROM
+    // wire. While the PC is parked on the HALT word the frozen fetch keeps
+    // re-latching it, so we mask it to NOP after the first execution: the
+    // strobes below all AND with ~halt_exec, guaranteeing a single, clean,
+    // permanent park with zero event churn (the old vvp livelock source).
+    assign halt_instr = (opcode == 8'h34);
 
     control_unit cu_inst (
         .opcode(opcode),
@@ -222,8 +236,6 @@ module cpu_top(
         .negative_flag(negative_flag_raw)
     );
 
-    wire [15:0] next_pc_val;
-
     wire is_jump_op = (opcode >= 8'h20) && (opcode <= 8'h26);
 
     // FLAG ALIGNMENT (the reason the fetch->execute register exists):
@@ -245,7 +257,10 @@ module cpu_top(
                      (opcode == 8'h26) ? ~negative_eff :      // JNN
                                          1'b1;                // JMP always jumps
 
-    wire flags_write_final = flags_write | (is_jump_op & ~cond_true);
+    // Flags are STICKY: only an ALU/CMP/SHL/SHR instruction raises
+    // flags_write and updates them. A taken jump clears nothing; a not-taken
+    // conditional jump preserves the CMP flags so a second branch can test
+    // the same flags (classic multi-way dispatch).
 
     flags_register flags_inst (
         .clk(clk), .rst(rst),
@@ -275,8 +290,7 @@ module cpu_top(
                          & ~gpio_write_enable & ~uart_we & g_clk_ok;
     wire stack_push_g  = stack_push & g_clk_ok;
     wire stack_pop_g   = stack_pop  & g_clk_ok;
-    wire flags_write_g = flags_write_final & g_clk_ok;
-    wire [15:0] next_pc_g = g_clk_ok ? next_pc_val : pc_out;   // frozen PC
+    wire flags_write_g = flags_write & g_clk_ok;
 
     gpio gpio_inst(
         .clk(clk),
@@ -299,9 +313,7 @@ module cpu_top(
     // mem_write_enable (the control unit raises mem_write_enable for STORE,
     // PUSH and CALL); using the raw opcode here instead would silently block
     // every STORE because the decoder's mem_write_enable IS the STORE signal.
-    wire ram_write_op  = stack_push | mem_write_enable;   // STORE / PUSH / CALL
-
-
+    // (ram_write_op itself is declared once in the gated-strobe block above.)
     wire ram_read_op   = (opcode == 8'h11) || stack_pop;  // LOAD  / POP  / RET
 
     // THE ADDRESS BUG THAT WAS FIXED: reg_data_b used to be a REGISTER FILE
@@ -338,7 +350,9 @@ module cpu_top(
         .write_enable(ram_write_g),
         .addr(ram_addr),
         .data_in(ram_data_in),
-        .data_out(ram_data_out)
+        .data_out(ram_data_out),
+        .rd_addr(ram_addr),
+        .rd_data(ret_addr)
     );
 
     stack_pointer sp_inst(
@@ -374,9 +388,12 @@ module cpu_top(
     // peripheral's combinational read data instead of the RAM cell.
     wire ram_or_io = (ram_addr >= 16'hFFF0) ? io_rd_data : ram_data_out;
     // Barrel shifter: SHL/SHR R[dest], R[src], amount (amount in [7:0]).
+    // SHL/SHR R[dest], R[src], amount: operand A must be the SOURCE register
+    // (src field -> port A reads src_reg). The barrel-shift amount lives in
+    // immediate[7:0], exactly as the assembler packs it.
     wire [15:0] shlshr_result = (opcode == 8'h07) ?
-                                (reg_data_a << immediate[7:0]) :
-                                (reg_data_a >> immediate[7:0]);
+                                (reg_a << immediate[7:0]) :
+                                (reg_a >> immediate[7:0]);
 
     assign reg_file_data_in = is_shlshr              ? shlshr_result :
                               (reg_in_source == 2'b01) ? immediate :
@@ -396,25 +413,24 @@ module cpu_top(
     // Reading sp+1 returned an empty stack cell (x) and the PC went to hell.
     // Correct source for both POP and RET is therefore ram[sp] itself.
     
-    // THE CALL/RET FIX: data_memory has registered output (data_out updates on
-    // the clock edge), so ram_data_out during the RET cycle holds the value
-    // from the PREVIOUS cycle's address, not the current sp. We need to read
-    // from the CURRENT sp combinationally. Add a direct RAM read port for
-    // stack pops by accessing the RAM array hierarchically.
-    wire [15:0] ret_addr = ram_inst.ram[ram_addr];  // combinational read at current sp
+    // THE CALL/RET FIX: RET must read the return address at the CURRENT sp
+    // combinationally. data_memory exposes a dedicated async read port
+    // (rd_addr/rd_data) for exactly this - no hierarchical poke into the
+    // RAM array (which created a zero-delay feedback path under vvp).
+    wire [15:0] ret_addr;
 
     // Conditional jumps / CALL also latch their PC on the same edge that
     // changes SP or flags - that is fine here because none of them READ a
     // value produced by their own edge. Only RET needs the fix above.
     assign next_pc_val = (pc_source_cu == 2'b10) ? ret_addr :     // RET -> pop PC from stack
                      (pc_source_cu == 2'b01 && cond_true) ? jump_addr :
-                     (pc_out + 16'b1);
+                     (ir_pc_next + 16'b1);   // sequential: captured fetch addr + 2
 
 
     // =====================================================================
     // HALT support (two flavours, both freeze every state element):
     //   1. the HALT instruction (opcode 0x34) parks the core on its own PC;
-    //   2. STORE bit0=1 to 0xFFFF latches `halted_q` permanently (until
+    //   2. STORE bit0=1 to 0xFFFF latches `mmio_halt` permanently (until
     //      reset) - the MMIO "power switch" for monitors and OS panics.
     // g_clk_ok is the "clock good" qualifier wired into PC, SP, register
     // file, flags, RAM writes and all MMIO write strobes below.
@@ -425,21 +441,22 @@ module cpu_top(
     //   0xFFFB rx byte | 0xFFFC {_,_,rx_ready,tx_busy} | 0xFFFD cycle counter
     //   0xFFFF signature bit0=1.  This is what poll loops in bootloaders use.
     // =====================================================================
-    wire is_gpio_addr = (ram_addr >= 16'hFFF0) && (ram_addr <= 16'hFFFA);
-    wire io_rd_en     = (opcode == 8'h11) && ~is_gpio_addr;   // LOAD into UART/sys win
+    // ANY LOAD aimed at the MMIO region (>=0xFFF0) reads peripherals, not RAM:
+    // GPIO input view, UART rx byte/status, cycle counter, signature.
+    wire io_rd_en     = (opcode == 8'h11) && (ram_addr >= 16'hFFF0);
     wire [15:0] io_rd_data;
 
     io_registers io_inst(
         .clk(clk), .rst(rst),
         .addr(ram_addr),
         .rd_en(io_rd_en),
-        .sys_we(1'b0),              // halt is decoded directly below (halted_q)
+        .sys_we(1'b0),              // halt is decoded directly below (mmio_halt)
         .wr_data(ram_data_in),
         .tx_busy(tx_busy),
         .rx_ready(rx_ready),
         .rx_byte(rx_byte),
         .rd_data(io_rd_data),
-        .halt()                     // unused output; cpu_top owns halted_q
+        .halt()                     // unused output; cpu_top owns mmio_halt
     );
 
     // UART receiver: lets a monitor/bootloader poll 0xFFFC bit1 then read 0xFFFB.
@@ -452,17 +469,21 @@ module cpu_top(
         .rx_ready(rx_ready)
     );
 
+    // Halt sequencer. Both flavours park the machine permanently:
+    //   * HALT instruction reaches the execute stage  -> halted_q sets NOW;
+    //     on the very same edge the PC freezes on the HALT word (next_pc_g
+    //     muxes to pc_out because g_clk_ok drops combinationally into the
+    //     PC's D input) and the IR latch stops capturing.
+    //   * STORE with bit0=1 to 0xFFFF (MMIO power switch, used by monitors
+    //     and OS panic handlers) -> halted_q sets after the write commits.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             halted_q <= 1'b0;
-            halt_arm <= 1'b1;
-        end else begin
-            if (halt_instr && halt_arm && !halted_q) begin
-                halted_q <= 1'b1;              // HALT instruction parks the PC here
-                halt_arm <= 1'b0;
-            end
-            if (ram_write_op && uart_we && ram_addr == 16'hFFFF && ram_data_in[0])
-                halted_q <= 1'b1;              // io_registers-style MMIO halt
+        end else if (g_clk_ok) begin
+            if (halt_instr)
+                halted_q <= 1'b1;
+            if (uart_we && ram_addr == 16'hFFFF && ram_data_in[0])
+                halted_q <= 1'b1;
         end
     end
 
