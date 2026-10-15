@@ -1,5 +1,4 @@
-# Simulation and build artifacts
+build/
 *.vcd
-*_tb
-*.o
-*.out
+*.dot
+__pycache__/
